@@ -424,3 +424,216 @@ def pt2ccsd_blocking(
             print(f"No plateau found, using max error = {err.real:.6f}")
 
     return energy_avg.real, err.real
+
+
+def ptccsd_ensemble_blocking(
+    h0,
+    weights,
+    components,
+    printQ=False,
+    min_blocks=5,
+    min_rise=0.20,
+    flat_tol=0.03,
+    k=3,
+    screen_outliers=True,
+    outlier_m=12.0,
+    min_screen_blocks=20,
+    max_reject_fraction=0.02,
+    denom_floor_rel=1.0e-12,
+):
+    """
+    Blocking analysis for ensemble-level first-order PT-CCSD components.
+
+    For PT-guided propagation, ``components`` must have columns
+    ``[r, r * theta, r * electronic_0, r * h_t]`` where
+    ``r = exp(-theta)`` is the inverse PT guide factor.  Each row is a
+    block-level AFQMC-weighted mean.  The estimator is
+
+        h0 + <electronic_0> + <h_t> - <theta> * <electronic_0>
+
+    with the averages taken using the corrected weights ``weights * r``.  The
+    uncertainty is estimated by leave-one-superblock-out jackknife over weighted
+    component sums.
+
+    Legacy ``[theta, electronic_0, h_t]`` components are still accepted; those
+    use the old HF-guide-style block weighting and are not the formal PT-guide
+    projected estimator.
+
+    A conservative block-level screen removes nonfinite blocks, effectively
+    zero-denominator blocks, and at most ``max_reject_fraction`` of otherwise
+    finite blocks whose corrected block energy is more than ``outlier_m`` robust
+    scales from the median.
+    """
+    weights = np.asarray(weights).ravel()
+    components = np.asarray(components)
+    if components.ndim != 2 or components.shape[1] not in (3, 4):
+        raise ValueError(
+            "components must have shape (n_blocks, 4) with columns "
+            "[r, r * theta, r * electronic_0, r * h_t], or legacy shape "
+            "(n_blocks, 3) with columns [theta, electronic_0, h_t]."
+        )
+    if components.shape[0] != weights.shape[0]:
+        raise ValueError(
+            f"weights length {weights.shape[0]} does not match components length "
+            f"{components.shape[0]}."
+        )
+
+    use_guide_reweight = components.shape[1] == 4
+
+    def block_energy_for_screen(
+        weights_in: np.ndarray, components_in: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        weighted_in = weights_in[:, None] * components_in
+        if use_guide_reweight:
+            denom_in = weighted_in[:, 0]
+            with np.errstate(divide="ignore", invalid="ignore"):
+                avg_in = weighted_in[:, 1:] / denom_in[:, None]
+        else:
+            denom_in = weights_in
+            avg_in = components_in
+        theta_in = avg_in[:, 0]
+        e0_in = avg_in[:, 1]
+        ht_in = avg_in[:, 2]
+        energy_in = (h0 + e0_in + ht_in - theta_in * e0_in).real
+        return denom_in, energy_in
+
+    denom_blocks, energy_blocks = block_energy_for_screen(weights, components)
+    finite_mask = np.isfinite(weights)
+    finite_mask &= np.all(np.isfinite(components), axis=1)
+    finite_mask &= np.isfinite(denom_blocks)
+    finite_mask &= np.isfinite(energy_blocks)
+
+    denom_abs = np.abs(denom_blocks)
+    denom_positive = denom_abs[np.isfinite(denom_abs) & (denom_abs > 0.0)]
+    if denom_positive.size > 0:
+        denom_floor = max(1.0e-300, float(denom_floor_rel) * float(np.median(denom_positive)))
+    else:
+        denom_floor = 1.0e-300
+    finite_mask &= denom_abs > denom_floor
+
+    robust_reject = np.zeros_like(finite_mask, dtype=bool)
+    if screen_outliers:
+        good_idx = np.flatnonzero(finite_mask)
+        good_energy = energy_blocks[good_idx]
+        if good_energy.size >= int(min_screen_blocks):
+            center = np.median(good_energy)
+            abs_dev = np.abs(good_energy - center)
+            mad_scale = 1.4826 * np.median(abs_dev)
+            q1, q3 = np.percentile(good_energy, [25.0, 75.0])
+            iqr_scale = (q3 - q1) / 1.349
+            min_scale = max(1.0e-12, 1.0e-12 * abs(float(center)))
+            scale = max(float(mad_scale), float(iqr_scale), min_scale)
+            candidates = np.flatnonzero(abs_dev > float(outlier_m) * scale)
+            min_keep = max(int(min_blocks), 2)
+            max_reject = int(np.floor(float(max_reject_fraction) * good_energy.size))
+            max_reject = max(0, min(max_reject, good_energy.size - min_keep))
+            if candidates.size > 0 and max_reject > 0:
+                order = np.argsort(abs_dev[candidates])[::-1]
+                rejected_local = candidates[order[:max_reject]]
+                robust_reject[good_idx[rejected_local]] = True
+
+    keep_mask = finite_mask & ~robust_reject
+    n_rejected_bad = int(weights.shape[0] - np.count_nonzero(finite_mask))
+    n_rejected_robust = int(np.count_nonzero(robust_reject))
+    if np.any(~keep_mask):
+        weights = weights[keep_mask]
+        components = components[keep_mask]
+
+    if n_rejected_bad or n_rejected_robust:
+        print(
+            "PT-CCSD ensemble outlier screen rejected "
+            f"{n_rejected_bad + n_rejected_robust} blocks "
+            f"({n_rejected_bad} invalid, {n_rejected_robust} robust outliers)."
+        )
+
+    n = weights.shape[0]
+    if n == 0:
+        raise ValueError("No valid PT-CCSD blocks remain after outlier screening.")
+    max_size = max(1, n // min_blocks)
+    raw = np.unique(np.rint(np.geomspace(1, max(2, max_size), 18)).astype(int))
+    block_grid = [int(b) for b in raw if b >= 1 and (n // b) >= min_blocks]
+
+    weighted_components = weights[:, None] * components
+    if use_guide_reweight:
+        total_c = weighted_components.sum(axis=0)
+        total_w = total_c[0]
+        full_avg = total_c[1:] / total_w
+    else:
+        total_w = weights.sum()
+        total_c = weighted_components.sum(axis=0)
+        full_avg = total_c / total_w
+    theta_avg, e0_avg, ht_avg = full_avg
+    energy_avg = h0 + e0_avg + ht_avg - theta_avg * e0_avg
+
+    block_sizes = []
+    block_errs = []
+    n_blocks_curve = []
+    for block_size in block_grid:
+        n_groups = n // block_size
+        if n_groups < 2:
+            continue
+        usable = n_groups * block_size
+        w_group = weights[:usable].reshape(n_groups, block_size).sum(axis=1)
+        c_group = (
+            weighted_components[:usable]
+            .reshape(n_groups, block_size, components.shape[1])
+            .sum(axis=1)
+        )
+
+        c_total = c_group.sum(axis=0)
+
+        if use_guide_reweight:
+            denom = c_total[0] - c_group[:, 0]
+            safe = np.abs(denom) > 1.0e-18
+            c_loo = c_total[None, :] - c_group
+            avg_loo = np.where(
+                safe[:, None],
+                c_loo[:, 1:] / denom[:, None],
+                c_total[None, 1:] / c_total[0],
+            )
+        else:
+            w_total = w_group.sum()
+            denom = w_total - w_group
+            safe = np.abs(denom) > 1.0e-18
+            c_loo = c_total[None, :] - c_group
+            avg_loo = np.where(safe[:, None], c_loo / denom[:, None], c_total[None, :] / w_total)
+
+        theta_loo = avg_loo[:, 0]
+        e0_loo = avg_loo[:, 1]
+        ht_loo = avg_loo[:, 2]
+        energy_loo = (h0 + e0_loo + ht_loo - theta_loo * e0_loo).real
+
+        loo_bar = energy_loo.mean()
+        var = (n_groups - 1) / n_groups * np.sum((energy_loo - loo_bar) ** 2)
+        block_sizes.append(block_size)
+        block_errs.append(float(np.sqrt(max(var, 0.0))))
+        n_blocks_curve.append(n_groups)
+
+    if not block_errs:
+        err = np.nan
+        block_star = None
+    else:
+        bs = np.asarray(block_sizes, dtype=int)
+        errs = np.asarray(block_errs, dtype=float)
+        groups = np.asarray(n_blocks_curve, dtype=int)
+        block_star, err, _ = _pick_plateau(
+            bs,
+            errs,
+            groups,
+            min_blocks=min_blocks,
+            min_rise=min_rise,
+            flat_tol=flat_tol,
+            k=k,
+        )
+
+    if printQ:
+        print("Performing Blocking Analysis for ensemble PT-CCSD energy...")
+        print(f"{'Bsz':>4s}  {'NB':>4s}  {'Energy':>11s}  {'Error':>8s}")
+        for block_size, n_groups, block_err in zip(block_sizes, n_blocks_curve, block_errs):
+            marker = "  <--" if block_star is not None and block_size == block_star else ""
+            print(
+                f"{block_size:4d}  {n_groups:4d}  "
+                f"{energy_avg.real:11.6f}  {block_err:8.6f}{marker}"
+            )
+
+    return jnp.asarray(energy_avg.real), jnp.asarray(err)
