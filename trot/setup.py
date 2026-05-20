@@ -198,6 +198,16 @@ def _make_trial_bundle(
         _setup_end(t_bundle, "trial bundle ready", details=f"kind={kind}")
         return trial_data, trial_ops, meas_ops
 
+    if kind == "hsccsd":
+        from .meas.ccsd import make_hsccsd_meas_ops
+        from .trial.ccsd import make_hsccsd_trial_data, make_hsccsd_trial_ops
+
+        trial_data = make_hsccsd_trial_data(data, sys)
+        trial_ops = make_hsccsd_trial_ops(sys=sys)
+        meas_ops = make_hsccsd_meas_ops(sys=sys)
+        _setup_end(t_bundle, "trial bundle ready", details=f"kind={kind}")
+        return trial_data, trial_ops, meas_ops
+
     if kind == "ucisd":
         from .meas.ucisd import make_ucisd_meas_ops
         from .trial.ucisd import make_ucisd_trial_data, make_ucisd_trial_ops
@@ -205,6 +215,16 @@ def _make_trial_bundle(
         trial_data = make_ucisd_trial_data(data, sys)
         trial_ops = make_ucisd_trial_ops(sys=sys)
         meas_ops = make_ucisd_meas_ops(sys=sys, mixed_precision=mixed_precision)
+        _setup_end(t_bundle, "trial bundle ready", details=f"kind={kind}")
+        return trial_data, trial_ops, meas_ops
+
+    if kind == "hsuccsd":
+        from .meas.uccsd import make_hsuccsd_meas_ops
+        from .trial.uccsd import make_hsuccsd_trial_data, make_hsuccsd_trial_ops
+
+        trial_data = make_hsuccsd_trial_data(data, sys)
+        trial_ops = make_hsuccsd_trial_ops(sys=sys)
+        meas_ops = make_hsuccsd_meas_ops(sys=sys)
         _setup_end(t_bundle, "trial bundle ready", details=f"kind={kind}")
         return trial_data, trial_ops, meas_ops
 

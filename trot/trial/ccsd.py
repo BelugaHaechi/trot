@@ -1,7 +1,142 @@
+from dataclasses import dataclass
+from typing import Any
+
 import jax
 import jax.numpy as jnp
+from jax import tree_util
 from numpy.typing import ArrayLike
-from typing import Any
+
+from ..core.ops import TrialOps
+from ..core.system import System
+
+
+@tree_util.register_pytree_node_class
+@dataclass(frozen=True)
+class HsCcsdTrial:
+    """
+    Fixed-sample HS representation of a restricted CCSD trial.
+
+    ``det_coeffs`` stores the sampled Thouless determinants with shape
+    ``(n_dets, norb, nocc)``.  ``ci_coeffs`` stores the linear coefficients in
+    the nonorthogonal determinant expansion; the HS sampler uses equal
+    coefficients by default.
+    """
+
+    det_coeffs: jax.Array
+    ci_coeffs: jax.Array
+
+    def __post_init__(self) -> None:
+        if not hasattr(self.det_coeffs, "ndim") or not hasattr(self.ci_coeffs, "ndim"):
+            return
+        if self.det_coeffs.ndim != 3:
+            raise ValueError(
+                "HsCcsdTrial.det_coeffs must have shape (n_dets, norb, nocc); "
+                f"got {self.det_coeffs.shape}."
+            )
+        if self.ci_coeffs.ndim != 1:
+            raise ValueError(
+                f"HsCcsdTrial.ci_coeffs must be rank 1; got {self.ci_coeffs.shape}."
+            )
+        if self.ci_coeffs.shape[0] != self.det_coeffs.shape[0]:
+            raise ValueError(
+                "HsCcsdTrial.ci_coeffs length must match det_coeffs.shape[0]; "
+                f"got {self.ci_coeffs.shape[0]} and {self.det_coeffs.shape[0]}."
+            )
+
+    @property
+    def ndets(self) -> int:
+        return int(self.det_coeffs.shape[0])
+
+    @property
+    def norb(self) -> int:
+        return int(self.det_coeffs.shape[1])
+
+    @property
+    def nocc(self) -> int:
+        return int(self.det_coeffs.shape[2])
+
+    def tree_flatten(self):
+        return (self.det_coeffs, self.ci_coeffs), None
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        det_coeffs, ci_coeffs = children
+        return cls(det_coeffs=det_coeffs, ci_coeffs=ci_coeffs)
+
+
+def _projector(c: jax.Array) -> jax.Array:
+    metric = c.conj().T @ c
+    return c @ jnp.linalg.solve(metric, c.conj().T)
+
+
+def get_rdm1(trial_data: HsCcsdTrial) -> jax.Array:
+    weights = jnp.abs(trial_data.ci_coeffs)
+    weights = weights / jnp.sum(weights)
+    dms = jax.vmap(_projector)(trial_data.det_coeffs)
+    dm = jnp.einsum("s,sij->ij", weights, dms, optimize="optimal")
+    dm = 0.5 * (dm + dm.conj().T)
+    return jnp.stack([dm, dm], axis=0)
+
+
+def det_overlaps_r(walker: jax.Array, trial_data: HsCcsdTrial) -> jax.Array:
+    mats = jnp.einsum("sni,nj->sij", trial_data.det_coeffs.conj(), walker, optimize="optimal")
+    return jax.vmap(jnp.linalg.det)(mats) ** 2
+
+
+def overlap_hs_r(walker: jax.Array, trial_data: HsCcsdTrial) -> jax.Array:
+    return jnp.sum(trial_data.ci_coeffs * det_overlaps_r(walker, trial_data))
+
+
+def make_hsccsd_trial_ops(sys: System) -> TrialOps:
+    if sys.nup != sys.ndn:
+        raise ValueError("HS-CCSD trial requires nup == ndn.")
+    if sys.walker_kind.lower() != "restricted":
+        raise ValueError(
+            f"HS-CCSD trial currently supports only restricted walkers, got: {sys.walker_kind}"
+        )
+    return TrialOps(overlap=overlap_hs_r, get_rdm1=get_rdm1)
+
+
+def make_hsccsd_trial_data_from_amplitudes(
+    trial_coeff: ArrayLike,
+    t1: ArrayLike,
+    t2: ArrayLike,
+    *,
+    seed: int = 0,
+    n_samples: int = 100,
+) -> HsCcsdTrial:
+    hs_op = build_hs_op(t2)
+    key = jax.random.PRNGKey(int(seed))
+    det_coeffs = init_walkers(trial_coeff, t1, hs_op, key, int(n_samples))
+    ci_coeffs = jnp.full((int(n_samples),), 1.0 / float(n_samples), dtype=det_coeffs.dtype)
+    return HsCcsdTrial(det_coeffs=det_coeffs, ci_coeffs=ci_coeffs)
+
+
+def make_hsccsd_trial_data(data: dict, sys: System | None = None) -> HsCcsdTrial:
+    del sys
+    if "det_coeffs" in data:
+        det_coeffs = jnp.asarray(data["det_coeffs"])
+        ci_raw = data.get("ci_coeffs")
+        if ci_raw is None:
+            ci_coeffs = jnp.full(
+                (det_coeffs.shape[0],),
+                1.0 / float(det_coeffs.shape[0]),
+                dtype=det_coeffs.dtype,
+            )
+        else:
+            ci_coeffs = jnp.asarray(ci_raw, dtype=det_coeffs.dtype)
+        return HsCcsdTrial(det_coeffs=det_coeffs, ci_coeffs=ci_coeffs)
+
+    trial_coeff = data.get("trial_coeff", data.get("mo"))
+    if trial_coeff is None:
+        raise KeyError("HS-CCSD trial data requires 'det_coeffs' or 'trial_coeff'/'mo'.")
+    return make_hsccsd_trial_data_from_amplitudes(
+        trial_coeff,
+        data["t1"],
+        data["t2"],
+        seed=int(data.get("seed", 0)),
+        n_samples=int(data.get("n_samples", 100)),
+    )
 
 
 def build_hs_op(t2: ArrayLike) -> jax.Array:

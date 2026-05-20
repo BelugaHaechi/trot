@@ -1,7 +1,171 @@
+from dataclasses import dataclass
+from typing import Any
+
 import jax
 import jax.numpy as jnp
+from jax import tree_util
 from numpy.typing import ArrayLike
-from typing import Any
+
+from ..core.ops import TrialOps
+from ..core.system import System
+
+
+@tree_util.register_pytree_node_class
+@dataclass(frozen=True)
+class HsUccsdTrial:
+    """
+    Fixed-sample HS representation of an unrestricted CCSD trial.
+
+    ``det_coeffs_a`` and ``det_coeffs_b`` store the sampled alpha/beta
+    determinants in the AFQMC one-particle basis with shapes
+    ``(n_dets, norb, nocc_a)`` and ``(n_dets, norb, nocc_b)``.
+    """
+
+    det_coeffs_a: jax.Array
+    det_coeffs_b: jax.Array
+    ci_coeffs: jax.Array
+
+    def __post_init__(self) -> None:
+        if not hasattr(self.det_coeffs_a, "ndim"):
+            return
+        if self.det_coeffs_a.ndim != 3 or self.det_coeffs_b.ndim != 3:
+            raise ValueError("HsUccsdTrial determinant arrays must be rank 3.")
+        if self.det_coeffs_a.shape[0] != self.det_coeffs_b.shape[0]:
+            raise ValueError("Alpha and beta determinant sample counts must match.")
+        if self.det_coeffs_a.shape[1] != self.det_coeffs_b.shape[1]:
+            raise ValueError("Alpha and beta determinant orbital dimensions must match.")
+        if self.ci_coeffs.ndim != 1:
+            raise ValueError(
+                f"HsUccsdTrial.ci_coeffs must be rank 1; got {self.ci_coeffs.shape}."
+            )
+        if self.ci_coeffs.shape[0] != self.det_coeffs_a.shape[0]:
+            raise ValueError("HsUccsdTrial.ci_coeffs length must match determinant samples.")
+
+    @property
+    def ndets(self) -> int:
+        return int(self.det_coeffs_a.shape[0])
+
+    @property
+    def norb(self) -> int:
+        return int(self.det_coeffs_a.shape[1])
+
+    @property
+    def nocc(self) -> tuple[int, int]:
+        return (int(self.det_coeffs_a.shape[2]), int(self.det_coeffs_b.shape[2]))
+
+    def tree_flatten(self):
+        return (self.det_coeffs_a, self.det_coeffs_b, self.ci_coeffs), None
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        det_coeffs_a, det_coeffs_b, ci_coeffs = children
+        return cls(det_coeffs_a=det_coeffs_a, det_coeffs_b=det_coeffs_b, ci_coeffs=ci_coeffs)
+
+
+def _projector(c: jax.Array) -> jax.Array:
+    metric = c.conj().T @ c
+    return c @ jnp.linalg.solve(metric, c.conj().T)
+
+
+def get_rdm1(trial_data: HsUccsdTrial) -> jax.Array:
+    weights = jnp.abs(trial_data.ci_coeffs)
+    weights = weights / jnp.sum(weights)
+    dm_a_s = jax.vmap(_projector)(trial_data.det_coeffs_a)
+    dm_b_s = jax.vmap(_projector)(trial_data.det_coeffs_b)
+    dm_a = jnp.einsum("s,sij->ij", weights, dm_a_s, optimize="optimal")
+    dm_b = jnp.einsum("s,sij->ij", weights, dm_b_s, optimize="optimal")
+    dm_a = 0.5 * (dm_a + dm_a.conj().T)
+    dm_b = 0.5 * (dm_b + dm_b.conj().T)
+    return jnp.stack([dm_a, dm_b], axis=0)
+
+
+def det_overlaps_u(
+    walker: tuple[jax.Array, jax.Array], trial_data: HsUccsdTrial
+) -> jax.Array:
+    wa, wb = walker
+    mats_a = jnp.einsum(
+        "sni,nj->sij", trial_data.det_coeffs_a.conj(), wa, optimize="optimal"
+    )
+    mats_b = jnp.einsum(
+        "sni,nj->sij", trial_data.det_coeffs_b.conj(), wb, optimize="optimal"
+    )
+    return jax.vmap(jnp.linalg.det)(mats_a) * jax.vmap(jnp.linalg.det)(mats_b)
+
+
+def overlap_u(walker: tuple[jax.Array, jax.Array], trial_data: HsUccsdTrial) -> jax.Array:
+    return jnp.sum(trial_data.ci_coeffs * det_overlaps_u(walker, trial_data))
+
+
+def overlap_r(walker: jax.Array, trial_data: HsUccsdTrial) -> jax.Array:
+    noa, nob = trial_data.nocc
+    return overlap_u((walker[:, :noa], walker[:, :nob]), trial_data)
+
+
+def make_hsuccsd_trial_ops(sys: System) -> TrialOps:
+    wk = sys.walker_kind.lower()
+    if wk == "restricted":
+        overlap_fn = overlap_r
+    elif wk == "unrestricted":
+        overlap_fn = overlap_u
+    else:
+        raise ValueError(
+            f"HS-UCCSD trial currently supports restricted/unrestricted walkers, got: {sys.walker_kind}"
+        )
+    return TrialOps(overlap=overlap_fn, get_rdm1=get_rdm1)
+
+
+def make_hsuccsd_trial_data_from_amplitudes(
+    trial_coeff: tuple[ArrayLike, ArrayLike],
+    t1: ArrayLike,
+    t2: ArrayLike,
+    *,
+    seed: int = 0,
+    n_samples: int = 100,
+) -> HsUccsdTrial:
+    hs_op = build_hs_op(t2)
+    key = jax.random.PRNGKey(int(seed))
+    det_coeffs_a, det_coeffs_b = init_walkers(trial_coeff, t1, hs_op, key, int(n_samples))
+    ci_coeffs = jnp.full((int(n_samples),), 1.0 / float(n_samples), dtype=det_coeffs_a.dtype)
+    return HsUccsdTrial(
+        det_coeffs_a=det_coeffs_a,
+        det_coeffs_b=det_coeffs_b,
+        ci_coeffs=ci_coeffs,
+    )
+
+
+def make_hsuccsd_trial_data(data: dict, sys: System | None = None) -> HsUccsdTrial:
+    del sys
+    if "det_coeffs_a" in data and "det_coeffs_b" in data:
+        det_coeffs_a = jnp.asarray(data["det_coeffs_a"])
+        det_coeffs_b = jnp.asarray(data["det_coeffs_b"])
+        ci_raw = data.get("ci_coeffs")
+        if ci_raw is None:
+            ci_coeffs = jnp.full(
+                (det_coeffs_a.shape[0],),
+                1.0 / float(det_coeffs_a.shape[0]),
+                dtype=det_coeffs_a.dtype,
+            )
+        else:
+            ci_coeffs = jnp.asarray(ci_raw, dtype=det_coeffs_a.dtype)
+        return HsUccsdTrial(
+            det_coeffs_a=det_coeffs_a,
+            det_coeffs_b=det_coeffs_b,
+            ci_coeffs=ci_coeffs,
+        )
+
+    trial_coeff_a = data.get("trial_coeff_a", data.get("mo_coeff_a", data.get("mo_a")))
+    trial_coeff_b = data.get("trial_coeff_b", data.get("mo_coeff_b", data.get("mo_b")))
+    if trial_coeff_a is None or trial_coeff_b is None:
+        raise KeyError(
+            "HS-UCCSD trial data requires sampled determinant arrays or alpha/beta trial coeffs."
+        )
+    return make_hsuccsd_trial_data_from_amplitudes(
+        (trial_coeff_a, trial_coeff_b),
+        (data["t1a"], data["t1b"]),
+        (data["t2aa"], data["t2ab"], data["t2bb"]),
+        seed=int(data.get("seed", 0)),
+        n_samples=int(data.get("n_samples", 100)),
+    )
 
 
 def build_hs_op(t2: ArrayLike) -> tuple[jax.Array, jax.Array]:
