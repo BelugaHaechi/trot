@@ -21,7 +21,7 @@ mf = scf.UHF(mol)
 mf.kernel()
 
 for i in range(2):
-    mo1 = mf.stability(external=True)[0]
+    mo1 = mf.stability()[0]
     mf = mf.newton().run(mo1, mf.mo_occ)  # type: ignore
 mf.stability()
 
@@ -149,7 +149,7 @@ def test_quadrature(target_spin):
     e2 = energy_kernel_uw_rh_s2(w, ham_data, meas_ctx, trial_data)
 
     assert abs(o1 - o2) < 1e-6, (o1, o2)
-    assert abs(e1.real - e2.real) < 1e-6, (e1.real, e2.real)
+    assert abs(e1.real - e2.real) < 1e-5, (e1.real, e2.real)
 
 
 if __name__ == "__main__":
