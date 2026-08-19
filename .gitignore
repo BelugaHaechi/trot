@@ -1,0 +1,7 @@
+*.pyc
+*.npz
+*.bin
+*.dat
+*.txt
+FCIDUMP_chol
+/testgrad
