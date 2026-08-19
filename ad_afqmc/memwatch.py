@@ -8,6 +8,9 @@ interval = 0.5
 peak_pss_kb = 0
 peak_rss_kb = 0
 
+# Per-PID peak PSS
+process_peaks = {}
+
 
 def descendants(root):
     """Return root PID + all descendant process PIDs. Threads are ignored."""
@@ -27,8 +30,8 @@ def descendants(root):
                 with open(f"/proc/{pid}/stat") as f:
                     stat = f.read()
 
-                # Field 4 is PPID.
-                # Handle process names containing spaces/parentheses safely.
+                # Everything after the final ")" starts with:
+                # state, ppid, ...
                 rest = stat[stat.rfind(")") + 2:].split()
                 ppid = int(rest[1])
 
@@ -43,7 +46,7 @@ def descendants(root):
 
 
 def memory_kb(pid):
-    """Return (RSS, PSS) from smaps_rollup."""
+    """Return (RSS, PSS) in KiB from smaps_rollup."""
     rss = 0
     pss = 0
 
@@ -60,32 +63,111 @@ def memory_kb(pid):
     return rss, pss
 
 
+def process_name(pid):
+    """Return command name for PID."""
+    try:
+        with open(f"/proc/{pid}/comm") as f:
+            return f.read().strip()
+    except (FileNotFoundError, ProcessLookupError, PermissionError):
+        return "?"
+
+start_time = time.monotonic()
+lines_printed = 0
 while os.path.exists(f"/proc/{root_pid}"):
+
     pids = descendants(root_pid)
 
     total_rss = 0
     total_pss = 0
+    current = []
+    for pid in sorted(pids):
 
-    for pid in pids:
         rss, pss = memory_kb(pid)
+
+        # Process may have disappeared between discovery and measurement
+        if rss == 0 and pss == 0:
+            continue
+
         total_rss += rss
         total_pss += pss
+
+        # Update this PID's peak
+        process_peaks[pid] = max(
+            process_peaks.get(pid, 0),
+            pss,
+        )
+
+        current.append(
+            (pid, process_name(pid), rss, pss, process_peaks[pid])
+        )
 
     peak_rss_kb = max(peak_rss_kb, total_rss)
     peak_pss_kb = max(peak_pss_kb, total_pss)
 
-    print(
-        f"\rprocesses={len(pids):2d}  "
-        f"PSS={total_pss / 1024**2:7.2f} GiB  "
-        f"RSS={total_rss / 1024**2:7.2f} GiB  "
-        f"peak PSS={peak_pss_kb / 1024**2:7.2f} GiB",
-        end="",
-        flush=True,
+    # time elapsed
+    elapsed = time.monotonic() - start_time
+    hours, rem = divmod(int(elapsed), 3600)
+    minutes, seconds = divmod(rem, 60)
+    elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+    lines = []
+
+    lines.append(
+        f"TOTAL"
+        f"    elapsed={elapsed_str}"
+        f"    PSS={total_pss / 1024**2:8.2f} GiB"
+        f"    RSS={total_rss / 1024**2:8.2f} GiB"
+        f"    peak PSS={peak_pss_kb / 1024**2:8.2f} GiB"
     )
 
+    lines.append("")
+    lines.append(
+        f"{'PID':>8} "
+        f"{'NAME':<16} "
+        f"{'PSS GiB':>10} "
+        f"{'RSS GiB':>10} "
+        f"{'PEAK PSS':>10}"
+    )
+    lines.append("-" * 60)
+
+    for pid, name, rss, pss, peak in current:
+        lines.append(
+            f"{pid:8d} "
+            f"{name:<16.16} "
+            f"{pss / 1024**2:10.2f} "
+            f"{rss / 1024**2:10.2f} "
+            f"{peak / 1024**2:10.2f}"
+        )
+
+    # Move back to beginning of our previous output
+    if lines_printed:
+        print(f"\033[{lines_printed}F", end="")
+
+    # Print each line, clearing that line first
+    for line in lines:
+        print(f"\033[2K{line}")
+
+    # If the previous display was taller, erase leftover lines
+    for _ in range(lines_printed - len(lines)):
+        print("\033[2K")
+
+    lines_printed = len(lines)
     time.sleep(interval)
 
+# total time elapsed
+elapsed = time.monotonic() - start_time
+hours, rem = divmod(int(elapsed), 3600)
+minutes, seconds = divmod(rem, 60)
 
-print()
-print(f"Peak PSS: {peak_pss_kb / 1024**2:.2f} GiB")
-print(f"Peak RSS: {peak_rss_kb / 1024**2:.2f} GiB")
+print("\nProcess finished.")
+print(f"Elapsed time: {hours:02d}:{minutes:02d}:{seconds:02d}")
+print(f"Peak total PSS: {peak_pss_kb / 1024**2:.2f} GiB")
+print(f"Peak total RSS: {peak_rss_kb / 1024**2:.2f} GiB")
+
+print("\nPer-process peak PSS:")
+for pid, peak in sorted(
+    process_peaks.items(),
+    key=lambda x: x[1],
+    reverse=True,
+):
+    print(f"  {pid:8d}: {peak / 1024**2:.2f} GiB")
