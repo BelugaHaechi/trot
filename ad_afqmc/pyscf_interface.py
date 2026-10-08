@@ -351,17 +351,18 @@ def chunked_cholesky(mol, max_error=1e-6, verbose=False, cmax=10):
 
 
 # write cholesky integrals
-def write_dqmc(
-    hcore,
-    hcore_mod,
-    chol,
-    nelec,
-    nmo,
-    enuc,
-    ms=0,
-    filename="FCIDUMP_chol",
-    mo_coeffs=None,
-):
+def write_dqmc(hcore, hcore_mod, chol, nelec, nmo, enuc, ms=0,
+        filename="FCIDUMP_chol", mo_coeffs=None):
+    """
+    Write Hamiltonian param integrals to an H5 file on disk.
+    - default filename is "FCIDUMP_chol" without .h5 extension
+    - keys: header, hcore, hcore_mod, chol, energy_core
+        - header is an array of N, K, spin, X
+        - H1 integrals are flattened to shape (K2,)
+            - NOTE: both H1 and H1-v0 integrals are provided
+        - CDERI input dim (X,K2), flattened to shape (XK2,)
+        - optionally, mo_coeffs_[up/dn] if provided
+    """
     assert len(chol.shape) == 2
     with h5py.File(filename, "w") as fh5:
         fh5["header"] = np.array([nelec, nmo, ms, chol.shape[0]])

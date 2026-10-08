@@ -10,7 +10,6 @@ from ad_afqmc import pyscf_interface, stat_utils
 from scipy.linalg import fractional_matrix_power
 import numpy as np
 from pyscf import df,gto,grad,scf,lib, ao2mo
-import pyscf
 import copy
 import math
 
@@ -100,7 +99,7 @@ def FD_integrals_chol(mf,dR= 1e-5,chol_cut=1e-5):
             
             h1_der_array[i,j] = h1_der
             h2_der_array[i,j] = h2_der
-    h0_der = pyscf.grad.rhf.grad_nuc(mol)
+    h0_der = grad.rhf.grad_nuc(mol)
     # X = get_transformation_matrix(mf.get_ovlp())
     # X_inv = np.linalg.inv(X)
     # c_ao = X_inv @ mf.mo_coeff
@@ -110,43 +109,69 @@ def FD_integrals_chol(mf,dR= 1e-5,chol_cut=1e-5):
     np.savez("Integral_der.npz",array1 = h1_der_array,array2=h2_der_array,array3=h0_der,dm=dm0)    
 
 def FD_integrals(mf,dR=0.00001):
+    """
+    Compute derivatives of hcore and chol LAO-basis integrals wrt nuclear positions,
+    using central finite difference.
+    - the benefit of FD is that it automatically considers basis response
+    - input is the mf object containing hcore and chol AO-basis integrals
+        - so we need to change from AO basis to LAO basis
+        - and also do this twice for the fwd and bwd perturbed nuclear positions
+        - and do this pair of actions once for every nuclear position
+        - expensive both in memory and time! but nvm
+    - returns nothing, saves derivatives to disk .npz file
+        - 4 items: d(hcore), d(chol), d(vnn), 1rdm
+        - all items are in the LAO basis!
+    - cost: 6N calls of HF integral builds and AO-LAO transf of chol
+        - doesn't involve running SCF
+        - time O(N5) with at least 10 prefactor
+        - space O(N4) with at least 5 prefactor
+    """
     basis = mf.mol.basis
     mol = mf.mol
     #atoms = mf.mol.atom
     atom_symbols, coords = [list(t) for t in zip(*mol.atom)]
     unit = mf.mol.unit
     #print("unit=",unit)
-    coords = np.array(coords)
+    coords = np.array(coords) # nuclear positions R
     df0 = df.incore.cholesky_eri(mol,auxbasis=mf.auxbasis)
 
+    # AO-LAO transf matrix, NOT a basis
     basis0 = np.array(fractional_matrix_power(mf.get_ovlp(), -0.5),dtype="float64")
+    # preallocate storage for results... note the huge space requirement
     h1_der_array = np.zeros((mol.natm,3,mol.nao,mol.nao))
-    h2_der_array = np.zeros((mol.natm,3,df0.shape[0],mol.nao,mol.nao))
-    
+    h2_der_array = np.zeros((mol.natm,3,df0.shape[0],mol.nao,mol.nao)) # O(3NXK2)=O(N4)
+    # do FD for every nuclear position (sort of like 3N jvp's)
     for i in range(len(atom_symbols)):
         coords_m = coords.copy()
         coords_p = coords.copy()
-        for j in range(3):
+        for j in range(3): # atom i, coord j in xyz
             coords_p = copy.copy(coords)#coords.copy()
             #print(coords_p)
+            # perturbed coordinates
             coords_p[i][j] += dR
+            # create perturbed atom list for the second DF-HF run
             atom_p = list(zip(atom_symbols,coords_p))
             mol_p = gto.M(atom=atom_p,basis=basis,verbose=1,unit=unit)
+            # get HF object, NOTE: kernel is never needed!! we just need integrals
             mf_p = df.density_fit(scf.RHF(mol_p),auxbasis=mf.auxbasis)
+            # AO-LAO transf matrix for the perturbed system
             basis_p = np.array(fractional_matrix_power(mf_p.get_ovlp(), -0.5),dtype="float64")
             #basis_p = get_transformation_matrix(mf_p.get_ovlp())#np.array(fractional_matrix_power(mf_p.get_ovlp(), -0.5),dtype="float64")
+
+            # get perturbed integrals hcore and chol, transform from AO to LAO
             h1_p = np.array(basis_p.T @ mf_p.get_hcore() @ basis_p, dtype="float64")
-            
             df_p = df.incore.cholesky_eri(mol_p,auxbasis=mf.auxbasis)
             df_p = lib.unpack_tril(df_p)
             chol_p = _ao2mo(df_p,basis_p)
 
+            # REPEAT THE ENTIRE THING, BUT WITH THE BACKWARDS DIFFERENCE
+            # ok so p = plus, m = minus
             coords_m = copy.copy(coords)
             #print(coords_m)
             coords_m[i][j] -= dR
             atom_m = list(zip(atom_symbols,coords_m))
             #print(i,j,atom_m)
-            mol_m = gto.M(atom=atom_m,basis=basis,verbose=3,unit=unit)
+            mol_m = gto.M(atom=atom_m,basis=basis,verbose=1,unit=unit)
             mf_m = df.density_fit(scf.RHF(mol_m),auxbasis=mf.auxbasis)
             #mf_m.kernel()
             basis_m = np.array(fractional_matrix_power(mf_m.get_ovlp(), -0.5),dtype="float64")
@@ -157,27 +182,46 @@ def FD_integrals(mf,dR=0.00001):
             df_m = lib.unpack_tril(df_m)
             chol_m = _ao2mo(df_m,basis_m)
 
+            # at this point we have the LAO-basis integrals for the two differences
+            # now compute central difference
             h1_der = (h1_p - h1_m)/(2.*dR)
             h2_der = (chol_p - chol_m)/(2.*dR)
-            
+            # save to array
             h1_der_array[i,j] = h1_der
             h2_der_array[i,j] = h2_der
-    h0_der = pyscf.grad.rhf.grad_nuc(mol)
+    # for nuc energy, call the analytical equation
+    h0_der = grad.rhf.grad_nuc(mol)
     # X = get_transformation_matrix(mf.get_ovlp())
     # X_inv = np.linalg.inv(X)
     # c_ao = X_inv @ mf.mo_coeff
     #c_ao = np.linalg.inv(basis0) @ mf.mo_coeff
     #dm0 = mf.make_rdm1(c_ao, mf.mo_occ) 
+
+    # finally, also convert the HF 1rdm to LAO basis
     if(isinstance(mf,scf.uhf.UHF)):
         dm0 = [basis0.T @ mf.get_ovlp() @ mf.make_rdm1()[0] @ mf.get_ovlp() @ basis0,basis0.T @ mf.get_ovlp() @ mf.make_rdm1()[1] @ mf.get_ovlp() @ basis0]
     elif(isinstance(mf,scf.rhf.RHF)):
         dm0 = basis0.T @ mf.get_ovlp() @ mf.make_rdm1()@ mf.get_ovlp() @ basis0 
+    # save to disk: FD derivs in LAO, 1rdm in LAO
     np.savez("Integral_der.npz",array1 = h1_der_array,array2=h2_der_array,array3=h0_der,dm=dm0)
 
 
 
 
 def write_integrals_lowdins(mf):
+    """
+    Given density-fitted MF object, extract integrals,
+    convert from AO to **Lowdin's orthogonalized AO basis**, and write to disk.
+    - this is instead of the MO basis we're used to above!
+
+    Writes to disk an H5 file called "FCIDUMP_chol" with keys:
+    - hcore:        MO basis Hcore integrals
+    - hcore_mod:    MO basis Hcore integrals minus "v0" remainder from H2 square decomposition (cost O(XK3))
+    - chol:         MO basis CDERIs (efficiently transformed directly, O(XK3) cost instead of O(K5))
+    - energy_core:  nuclear repulsion energy
+
+    Also writes to disk an rhf.npz file with the trial mo_coeff BUT in the LowdinAO basis
+    """
     mol = mf.mol
     # X =  get_transformation_matrix(mf.get_ovlp())
     # basis0 = X.copy()
@@ -349,6 +393,15 @@ def find_nproc():
 
 
 def get_rdmsDer_rhf(norb,nchol,filename="en_der_afqmc.npz",nproc = 4):
+    """
+    Gather afqmcGrad results written to disk, for each MPI process.
+    - gets weights, rdm1, cdrdm2    stacked across all superblocks
+    - reshapes to tensors: (superblocks*nproc, *item)
+    - WARN: there is a serious issue! the preblocked averages are stored by superblock first, then
+        nproc, so it is a DIFFERENT order than the energy preblocks! autocorrelation gets mixed up
+        - (all superblocks from proc1) + (all superblocks from proc2) + ...
+        - also using append for loop is bad, should do concat
+    """
     rdm1 = []
     rdm2 = []
     weight = []
@@ -362,7 +415,7 @@ def get_rdmsDer_rhf(norb,nchol,filename="en_der_afqmc.npz",nproc = 4):
             rdm2.append(rdm2i[j])
             weight.append(weighti[j])
     #import pdb;pdb.set_trace()
-    return np.array(rdm1),np.array(rdm2),np.array(weight)
+    return np.array(rdm1),np.array(rdm2),np.array(weight) # convert array of (n,) items to array of (n,*items)
 
 def get_rdmsDer_uhf(norb,nchol,filename="en_der_afqmc.npz",nproc = 4):
     rdm1 = []
@@ -381,6 +434,16 @@ def get_rdmsDer_uhf(norb,nchol,filename="en_der_afqmc.npz",nproc = 4):
     return np.array(rdm1),np.array(rdm2),np.array(weight)
 
 def calculate_nuc_gradients(integral_der = "Integral_der.npz", energy_der= "en_der_afqmc.npz",printG=True,printQ=False,uhf=False):
+    """
+    Calculate ph-AFQMC nuclear gradient estimates and their associated standard errors.
+    - reads from disk:
+        - derivs of LAO-basis integrals wrt nuclear coords
+        - derivs of ph-AFQMC process-preblocked averages wrt LAO-basis integrals
+            - shape (nsuperblocks*nproc, *items)
+    - computes nsuperblocks*nproc gradient preblocks
+    - does usual final blocking analysis on these preblocks
+        - return estimated gradient, estimated SE of the estimated gradient 
+    """
     h1_der = np.load(integral_der)["array1"] #(natm,3,norb,norb)
     h2_der = np.load(integral_der)["array2"] #(natm,3,nchol,norb,norb)
     h0_der = np.load(integral_der)["array3"]  #(natm,3)
@@ -394,12 +457,13 @@ def calculate_nuc_gradients(integral_der = "Integral_der.npz", energy_der= "en_d
         gradients = obs1 + obs2 + obs0
     else: 
         rdm1,rdm2,weights = get_rdmsDer_rhf(h1_der.shape[2],h2_der.shape[2],nproc= find_nproc())
-        obs1 = np.einsum("rxpq,npq->nrx",h1_der,rdm1)
+        obs1 = np.einsum("rxpq,npq->nrx",h1_der,rdm1)   # r nuccoord, x xyzdim, gpq tensoridx, n preblocks
         obs2 = np.einsum("rxgpq,ngpq->nrx",h2_der,rdm2)
         obs0 = h0_der
-        gradients = obs1 + obs2 + obs0
+        gradients = obs1 + obs2 + obs0 # shape (nsuperblocks*nproc, natom, 3) ... useable for blocking analysis
 
-
+    # with preblocks of gradients, get estimated mean and estimated standard error of the estimated mean
+    # reject outliers + blocking analysis
     natm = gradients.shape[1]
     error = np.zeros((natm,3))
     avg = np.zeros((natm,3))
@@ -430,6 +494,7 @@ def calculate_nuc_gradients(integral_der = "Integral_der.npz", energy_der= "en_d
             #     error[i,j] = ""
     #import pdb;pdb.set_trace()
     if(printG):
+        np.set_printoptions(suppress=True, precision=10)
         print("Blocking analysis done")
         print("--------------- AFQMC Gradient ---------------\n")
         print(avg)

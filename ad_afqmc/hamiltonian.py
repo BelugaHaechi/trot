@@ -20,12 +20,31 @@ print = partial(print, flush=True)
 
 @dataclass
 class hamiltonian:
+    """
+    Dataclass that stores 3 numbers, norb, nelec, nchol, relevant to a (restricted) Hamiltonian.
+    Also stores 3 instance methods that takes in dict "ham_data" (integrals from HF), and trial MOs
+    The methods update ham_data:
+    - Transforms integrals from AO to MO basis, updating old keys
+    - Precontracts integrals with the trial, stored as new keys
+    - Builds the one-body propagator (with normalization), stored as new keys
+
+    The remaining classes are variants for UHF, GHF, and NOCI, which have the same structure.
+    - Except NOCI, which has a more complicated multidet trial, that yield an array of precontractions
+        - Note the horrible naming, `rot_ham` calls `rot_orbs_single_det` ...
+    """
     norb: int  # number of spatial orbitals
     nelec: int  # number of electrons of each spin, so nelec = total_nelec // 2
     nchol: int
 
     @partial(jit, static_argnums=(0,))
     def rot_orbs(self, ham_data, mo_coeff):
+        """
+        AO to MO transform of the integrals.
+        - Cost O(XK3), dominated by transforming CDERIs
+        - Misnomer, not really a rotation because C is not unitary (bc AO not ortho)
+
+        ham_data contains raw HF AO integrals (core and chol)
+        """
         ham_data["h1"] = mo_coeff.T.dot(ham_data["h1"]).dot(mo_coeff)
         ham_data["chol"] = jnp.einsum(
             "gij,jp->gip", ham_data["chol"].reshape(-1, self.norb, self.norb), mo_coeff
@@ -37,7 +56,15 @@ class hamiltonian:
 
     @partial(jit, static_argnums=(0,))
     def rot_ham(self, ham_data, wave_data=None):
-        ham_data["h1"] = (ham_data["h1"] + ham_data["h1"].T) / 2.0
+        """
+        Precontraction of H1 and H2 integrals with the HF trial (wave_data).
+        - Cost O(XNK2), dominated by precontracting CDERIs 
+        - Misnomer, doesn't actually "rotate" the Hamiltonian
+        - Used for energy evaluation
+
+        Also cleans slight numerical issues in H1 by symmetrizing it
+        """
+        ham_data["h1"] = (ham_data["h1"] + ham_data["h1"].T) / 2.0      # symmetrizing H1, removes numerical asymm
         #ham_data["rot_h1"] = ham_data["h1"][: self.nelec, :].copy()
         #ham_data["rot_chol"] = (
         #    ham_data["chol"]
@@ -50,6 +77,18 @@ class hamiltonian:
 
     @partial(jit, static_argnums=(0, 3))
     def prop_ham(self, ham_data, dt, _trial, wave_data=None):
+        """
+        Build and store the halftime one-body propagator with mean-background subtraction.
+        - Cost O(XN3), dominated by building v0 (U in my notation), the 1b correction to the square decomposition of the 2b operator
+        - Misnomer, doesn't really propagate anything, only builds the propagator and appends it as a new key in ham_data for later use
+        - The three functions above are meant to be used in succession (exactly in this order)
+            - Optionally, if we omit the first step (AO-MO transform), we effectively do the entire computation in the AO basis
+                - Only meaningful when AO basis is ortho (verify?)
+                - See (Nuclear gradient using orthogonal AO basis)[7bb0d4a0a5d0f2c220714860e59fa3c4e5ce29bb]
+                - Internal name is "norot"
+
+        Also creates a different set of shifts for "fp", which is used in propagation.propagate_free() ...?
+        """
         trial = wave_data[:,:self.nelec]
         dm = 2.*trial@ trial.T
         #ham_data["mf_shifts"] = 2.0j * vmap(

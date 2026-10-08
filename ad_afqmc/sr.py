@@ -14,6 +14,7 @@ from jax import jit, vmap
 
 # this uses numpy but is only called once after each block
 def stochastic_reconfiguration_np(walkers, weights, zeta):
+    """SR without jax. Currently unused."""
     nwalkers = walkers.shape[0]
     walkers = np.array(walkers)
     weights = np.array(weights)
@@ -32,6 +33,7 @@ def stochastic_reconfiguration_np(walkers, weights, zeta):
 # @checkpoint
 @jit
 def stochastic_reconfiguration(walkers, weights, zeta):
+    """SR for RHF, but no MPI support (only works within one rank)."""
     nwalkers = walkers.shape[0]
     cumulative_weights = jnp.cumsum(jnp.abs(weights))
     total_weight = cumulative_weights[-1]
@@ -59,6 +61,7 @@ def stochastic_reconfiguration_uhf(walkers, weights, zeta):
 
 # this uses numpy but is only called once after each block
 def stochastic_reconfiguration_mpi(walkers, weights, zeta, comm):
+    """SR for RHF, that gathers all MPI ranks."""
     size = comm.Get_size()
     rank = comm.Get_rank()
     nwalkers = walkers.shape[0]

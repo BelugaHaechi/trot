@@ -250,7 +250,38 @@ class rhf(wave_function):
         return rdm1
 
     @partial(jit, static_argnums=0)
-    def optimize_orbs(self, ham_data, wave_data=None):
+    def optimize_orbs(self, ham_data, wave_data):
+        """
+        Autodiff-compliant Hartree-Fock solver using CDERIs in the LAO basis.
+        - notably, it is set up so that the final energy depends on the integrals!
+            - this allows autodiff wrt the integrals
+            - WARN: but it treats the initial guess as an independent constant
+                - this is fine, bc converged SCF is asymptotically independent of it
+                - mathematically justified fixed-point property
+        - args: ham_data (with h1 and chol), wave_data (init guess)
+            - if ham_data.dm0 is not None, then it is used as init guess instead of wave_data
+        - returns: mo_coeff (after n_opt_iter=30 SCF cycles)
+
+        WARN:
+        - getting derivs will require rev-AD through the entire SCF procedure
+            - this is memory intensive (though not as so compared to AFQMC)
+            - can be improved substantially by custom_vjp based on implicit fixed-point
+                - adjoint CPHF formulation
+            - but still, AFQMC rev-AD memory is the bigger problem here!
+
+        Details:
+        - imposes a deterministic sign convention on mo_coeffs (positive col maxiumums)
+            - idk if this is very useful, also doesn't help when there is degeneracy
+        - constructs next iteration using aufbau
+        - performs fixed number of iterations, n_opt_iter = 30 default
+            - WARN: does NOT check convergence
+        - uses ham_data['dm0'] as init guess, which is the trial wfn in LAO basis
+            - basically using a converged DM as init guess
+            - so this "converges" immediately if we use the same integrals (which we do)
+            - in the other case, even if we perturb the integrals by a bit, we should
+              expect the convergence to be still very quick
+            - but n_opt_iter steps are done anyways!
+        """
         h1 = ham_data["h1"]
         h2 = ham_data["chol"]
         h2 = h2.reshape((h2.shape[0], h1.shape[0], h1.shape[0]))
@@ -266,10 +297,13 @@ class rhf(wave_function):
             vhf = vj - 0.5 * vk
             fock = h1 + vhf
             mo_energy, mo_coeff = linalg_utils._eigh(fock)
+            # deterministic sign convention: for each MO's LAO coeffs, make sure that
+            # the largest coeff is positive; if not, make it so by taking negatives
             idx = jnp.argmax(abs(mo_coeff.real), axis=0)
             mo_coeff = jnp.where(
                 mo_coeff[idx, jnp.arange(len(mo_energy))].real < 0, -mo_coeff, mo_coeff
             )
+            # aufbau construction of next dm
             e_idx = jnp.argsort(mo_energy)
             nmo = mo_energy.size
             mo_occ = jnp.zeros(nmo)
@@ -280,9 +314,13 @@ class rhf(wave_function):
             return dm, mo_coeff
 
         norb = h1.shape[0]
-#        dm0 = 2 * jnp.eye(norb, nelec).dot(jnp.eye(norb, nelec).T)
-        if(ham_data["dm0"] is not None): dm0 = ham_data["dm0"]
-        else : dm0 = 2 * jnp.eye(norb, nelec).dot(jnp.eye(norb, nelec).T)
+#       dm0 = 2 * jnp.eye(norb, nelec).dot(jnp.eye(norb, nelec).T) # dlai: legacy identity init guess
+        if ham_data["dm0"] is not None:
+            dm0 = jnp.array(ham_data["dm0"])
+        else:
+            mocc = wave_data[:, :nelec]
+            dm0 = 2.0 * mocc @ mocc.T
+
         _, mo_coeff = lax.scan(scanned_fun, dm0, None, length=self.n_opt_iter)
 
         return mo_coeff[-1]

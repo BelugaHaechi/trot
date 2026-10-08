@@ -21,6 +21,15 @@ from jax import dtypes, jvp, random, vjp
 
 print = partial(print, flush=True)
 
+"""
+Highest-level API.
+
+Calls MPI-enabled AFQMC runs, given an options dict.
+- Sets up multithreading env vars
+- Calls mpirun -np <nproc> python mpi_jax.py
+
+fp version doesn't seem to work, and is not used
+"""
 
 def run_afqmc(options=None, script=None, mpi_prefix=None, nproc=None):
     if options is None:

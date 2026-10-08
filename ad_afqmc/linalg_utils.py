@@ -19,6 +19,11 @@ print = partial(print, flush=True)
 @custom_jvp
 @jit
 def detach(x):
+    """
+    Manually block gradient eaul eval from this point.
+    - no effect on primal values during fwd pass
+    - custom jvp has it return 0 as tangents
+    """
     return x
 
 
@@ -29,6 +34,15 @@ def detach_grad(primals, tangents):
 
 @custom_jvp
 def _eigh(a):
+    """
+    jnp.linalg.eigh, but with a manually stabilized eigenvector derivative near degeneracies.
+    - When two eigvals near degen within 1e-5, sets 1/(∆λ) to 1e200
+        - WARN: very conservative cutoff, might be too rough
+
+    Called in: wavefunction.optimize_orbs()
+    - this is a custom HF code embedded in here...?
+    - might be for getting trial wfn related derivatives
+    """
     w, v = jnp.linalg.eigh(a)
     return w, v
 
@@ -64,6 +78,10 @@ def _eigh_jvp_jitted_nob(v, Fmat, at):
 
 @jit
 def qr_vmap(walkers):
+    """
+    jnp.linalg.qr with vmap for a batch of walkers.
+    - Misnomer: ALSO RETURNS THE NORM FACTOR
+    """
     walkers, r = vmap(jnp.linalg.qr)(walkers)
     norm_factors = vmap(lambda x: jnp.prod(jnp.diag(x)))(r)
     return walkers, norm_factors
@@ -81,6 +99,11 @@ def qr_vmap_uhf(walkers):
 # modified cholesky for a given matrix
 @partial(jit, static_argnums=(1, 2))
 def modified_cholesky(mat, norb, nchol_max):
+    """
+    Partial Cholesky decomposition upto nchol_max vectors.
+    - optimized via lax.scan
+    - WARN: performs fixed number of Cholesky steps instead of using an error tolerance!
+    """
     diag = mat.diagonal()
     size = mat.shape[0]
     # norb = (jnp.sqrt(1+8*size).astype('int8') - 1)//2

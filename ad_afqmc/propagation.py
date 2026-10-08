@@ -15,9 +15,40 @@ import jax.numpy as jnp
 import jax.scipy as jsp
 from jax import jit, lax, random, vmap
 
-from ad_afqmc import linalg_utils, sr, wavefunctions
+from ad_afqmc import linalg_utils, sr, wavefunctions, hamiltonian
 
 print = partial(print, flush=True)
+
+"""
+Propagator class. Stores core functions related to propagation,
+parametrized by a set of constant settings.
+
+Does not store any tensors, just provides the related actions.
+
+Instance variables
+- timestep
+- steps per E-block
+- E-blocks per SR-block
+- SR-blocks per "block"
+- superblocks per AFQMC
+- flag for whether ad_mode is not None
+- walker count (for initialization)
+- Taylor terms in expm expansion
+
+Methods
+- init_prop_data()      creates empty arrays for weights, walkers
+- SR_local
+- SR_global
+- orthonormalize_walkers
+- apply_propagator
+- apply_propagator_vmap
+- calc_imp_fun
+- propagate()
+
+Subclasses
+- propagator_uhf        note this means the base prop is RHF only!
+- propagator_cpmc (5x)
+"""
 
 
 @dataclass
@@ -27,11 +58,30 @@ class propagator:
     n_ene_blocks: int = 50
     n_sr_blocks: int = 1
     n_blocks: int = 50
-    ad_q: bool = True
+    is_ad_mode_enabled: bool = True
     n_walkers: int = 50
     n_exp_terms: int = 6
 
-    def init_prop_data(self, trial, wave_data, ham, ham_data, init_walkers=None):
+    def init_prop_data(self, trial: wavefunctions.wave_function, wave_data,
+                             ham: hamiltonian.hamiltonian, ham_data, init_walkers=None):
+        """
+        Create and return a new prop_data dict for **RHF WALKERS**. Contains:
+        - initial weights, all 1, shape (M,)
+        - initial walkers, default to copies of the TRIAL wfn but COMPLEX (WARN: HARDCODED BEHAVIOR by Jo)
+            - shape (M,K,N)
+            - optionally can override by supplying init_walkers, shape (K,N) complex
+            - commented out alternative of defaulting to (K,N) 0-padded identity (old ver by ankit)
+                - curious if this worked, probably did but should take much longer to converge
+        - computes initial energy estimate: prop_data.e_estimate
+            - does a rather wasteful vmap of all the walkers energy and then averages it, then drops imag part
+            - but actually all walkers are the same (in the default case) so it is wasteful
+            - also sets prop_data.pop_control_ene_shift to the same value... TODO: what is this for???
+        - computes initial overlaps
+            - again rather wasteful vmap but useful when not all init walkers are the same
+            - I guess this is fine because the cost is negligible in the grand scheme of things
+        - so the returned prop_data has 5 keys
+        - this function works very normally and no surprises here :)
+        """
         prop_data = {}
         prop_data["weights"] = jnp.ones(self.n_walkers)
         if init_walkers is not None:
@@ -52,6 +102,11 @@ class propagator:
 
     @partial(jit, static_argnums=(0,))
     def stochastic_reconfiguration_local(self, prop_data):
+        """
+        Calls SR on the prop_data weights and walkers. Handles random keys here.
+        - the global version below has MPI communication, so it does it over all ranks
+            - typically called at the end of a superblock in the driver
+        """
         prop_data["key"], subkey = random.split(prop_data["key"])
         zeta = random.uniform(subkey)
         prop_data["walkers"], prop_data["weights"] = sr.stochastic_reconfiguration(
@@ -68,12 +123,28 @@ class propagator:
         return prop_data
 
     def orthonormalize_walkers(self, prop_data):
+        """
+        Thin wrapper around linalg_utils.qr_vmap(). Affects walkers only.
+        - unnecesary extra layer... just a simple vmap of jnp.linalg.qr
+        - also discards the norm factors!!
+        """
         prop_data["walkers"], _ = linalg_utils.qr_vmap(prop_data["walkers"])
         return prop_data
 
     # defining this separately because calculating vhs for a batch seems to be faster
     @partial(jit, static_argnums=(0,))
     def apply_propagator(self, exp_h1, vhs_i, walker_i):
+        """
+        Apply the full propagator onto ONE walker. Batch called by apply_propagator_vmap()
+        - NOTE: the arg vhs_i needs to be precontracted for the specific walker
+        - first, apply halftime 1b prop
+        - then, use scan to generate a list of W, VW, V2W, V3W... for n_exp_terms
+            - NOTE: this is memory inefficient, usually n_exp_terms is 6 so this 6x the total memory
+            - can be done better, but we don't do this for now TODO: see how much memory we save by testing
+        - then, do the Taylor series sum (again, keeping a running sum would be MUCH better)
+            - the jnp.stack again shows how this uses 6x the total memory
+        - finally, apply halftime 1b prop again
+        """
         walker_i = exp_h1.dot(walker_i)
 
         def scanned_fun(carry, x):
@@ -97,6 +168,13 @@ class propagator:
 
     @partial(jit, static_argnums=(0,))
     def apply_propagator_vmap(self, ham, walkers, fields):
+        """
+        Batch apply random propagator to all walkers. Called by propagate()
+        - this step builds the vhs operators for ALL walkers, given ALL random fields
+            - fields * chol -> vhs has shapes (M,X) * (X,K2) -> (M,K2)
+                - note chol was flattened first in the driver
+            - Time: O(MXK2), Space: O(MXK2)
+        """
         vhs = (
             1.0j
             * jnp.sqrt(self.dt)
@@ -111,6 +189,10 @@ class propagator:
     # defining this separately because of possible divergences in derivatives
     # @custom_jvp
     def calc_imp_fun(self, exponent_1, exponent_2, overlaps_new, overlaps_old):
+        """
+        Computes importance function value, AND the phase angle. For a specific walker.
+        - ONLY the raw value, NO phaseless yet! apply abs and cos later
+        """
         imp_fun = jnp.exp(exponent_1) * overlaps_new / overlaps_old
         theta = jnp.angle(jnp.exp(exponent_2) * overlaps_new / overlaps_old)
         # imp_fun_phaseless = jnp.abs(imp_fun) * jnp.cos(theta)
@@ -126,6 +208,23 @@ class propagator:
 
     @partial(jit, static_argnums=(0, 1))
     def propagate(self, trial, ham, prop, fields, wave_data):
+        """
+        Main propagator for all walkers, with force bias, phaseless, mean subtraction, and more
+        - force bias for each walker is computed (fn of walkers and trial)
+        - addresses mean subtraction (mf_shifts) TODO: learn how this works
+        - MAIN: propagates all walkers by calling apply_propagator_vmap
+        - computes new overlaps (stores at very end, after phaseless)
+        - computes importance function and phaseless version (which makes it real)
+        - outlier clipping
+            - ZEROS importance function if too large (over 100)     WARN: unknown reasoning, hardcoded
+            - ZEROS weight if too large (over 100)                  WARN: unknown reasoning, hardcoded
+        - updates pop_control_ene_shift as a 90/10 EMA with inverse timestep * log average of new weights (WHY???)
+
+        Things NOT done every step:
+        - reorthonormalization
+        - SR
+        - energy evaluation
+        """
         force_bias = trial.calc_force_bias_vmap(prop["walkers"], ham, wave_data)
         field_shifts = -jnp.sqrt(self.dt) * (1.0j * force_bias - ham["mf_shifts"])
         shifted_fields = fields - field_shifts
@@ -140,9 +239,8 @@ class propagator:
 
         overlaps_new = trial.calc_overlap_vmap(prop["walkers"], wave_data)
         imp_fun, theta = self.calc_imp_fun(
-            -jnp.sqrt(self.dt) * shift_term
-            + fb_term
-            + self.dt * (prop["pop_control_ene_shift"] + ham["h0_prop"]),
+            -jnp.sqrt(self.dt) * shift_term + fb_term
+                + self.dt * (prop["pop_control_ene_shift"] + ham["h0_prop"]),
             -jnp.sqrt(self.dt) * shift_term,
             overlaps_new,
             prop["overlaps"],
@@ -155,7 +253,8 @@ class propagator:
         imp_fun_phaseless = jnp.where(imp_fun_phaseless > 100.0, 0.0, imp_fun_phaseless)
         prop["weights"] = imp_fun_phaseless * prop["weights"]
         prop["weights"] = jnp.where(prop["weights"] > 100.0, 0.0, prop["weights"])
-        prop["pop_control_ene_shift"] = prop["e_estimate"] - 0.1 * jnp.array(jnp.log(jnp.sum(prop["weights"]) / self.n_walkers) / self.dt)  # type: ignore
+        prop["pop_control_ene_shift"] = prop["e_estimate"] - 0.1 * jnp.array(
+            jnp.log(jnp.sum(prop["weights"]) / self.n_walkers) / self.dt)  # type: ignore
         prop["overlaps"] = overlaps_new
         return prop
 

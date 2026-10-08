@@ -4,6 +4,15 @@ from pyscf import df,lib,scf,gto
 import numpy as np
 from ad_afqmc import pyscf_interface
 from scipy.linalg import fractional_matrix_power
+
+"""
+Somehow all of these functions are unused :(
+
+OK turns out this is bc a newer version of these exist in grad_utils.py
+"""
+
+
+
 def _ao2mo(chol,C): #Convert the 2e integrals from AO to MO basis
     chol2 = np.zeros((chol.shape[0], C.shape[0], C.shape[0]))
     for i in range(chol.shape[0]):
@@ -11,6 +20,14 @@ def _ao2mo(chol,C): #Convert the 2e integrals from AO to MO basis
     return chol2
 
 def write_df_integralsAFQMC(mf,h1=None,chol=None): #mf DF MF object
+    """
+    Given density-fitted MF object, extract integrals, convert from AO to MO, and write to disk.
+    - writes to disk an H5 file called "FCIDUMP_chol" with keys:
+    - hcore:        MO basis Hcore integrals
+    - hcore_mod:    MO basis Hcore integrals minus "v0" remainder from H2 square decomposition (cost O(XK3))
+    - chol:         MO basis CDERIs (efficiently transformed directly, O(XK3) cost instead of O(K5))
+    - energy_core:  nuclear repulsion energy
+    """
     mol = mf.mol
     if(chol is None):
         df0 = df.incore.cholesky_eri(mol,auxbasis=mf.auxbasis)#
@@ -40,6 +57,11 @@ def write_df_integralsAFQMC(mf,h1=None,chol=None): #mf DF MF object
     print("nelec:",sum(nelec))
 
 def write_df_lowdins_integralsAFQMC(mf,h1=None,chol=None):
+    """
+    Given density-fitted MF object, extract integrals,
+    convert from AO to **Lowdin's orthogonalized AO basis**, and write to disk.
+    - this is instead of the MO basis we're used to above!
+    """
     mol = mf.mol
     basis0 = np.array(fractional_matrix_power(mf.get_ovlp(), -0.5),dtype="float64")
     X = basis0.copy()
@@ -114,6 +136,7 @@ def find_nproc():
     return max(indices)+1
 
 def get_rdmsDer_rhf(norb,nchol,filename="en_der_afqmc.npz",nproc = 4):
+    """Unused..."""
     rdm1 = []
     rdm2 = []
     weight = []
@@ -131,6 +154,12 @@ def get_rdmsDer_rhf(norb,nchol,filename="en_der_afqmc.npz",nproc = 4):
 
 from pyscf import ao2mo
 def hf_custom(mf2,integrals, n_orbs, n_elec, dm_0=None,verbose=None):
+    """
+    Custom HF mf object that converges SCF with hardcoded integrals!
+    - this effectively creates HF mo_coeff as a function of integrals, which is useful for AD
+    
+    Currently unused, but seems to be useful
+    """
     mol = gto.Mole()
     mol.nelectron = sum(n_elec)
     mol.incore_anyway = True
