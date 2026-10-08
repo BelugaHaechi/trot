@@ -68,8 +68,8 @@ options = {
         "dt": 0.01,
         "n_prop_steps": 50, # sets sampling interval
         "n_ene_blocks": 8, # sets SR frequency
-        "n_sr_blocks":  6, # sets preblock size
-        "n_blocks":     100, # sets n preblocks (along w nproc)
+        "n_sr_blocks":  20, # sets preblock size
+        "n_blocks":     4, # sets n preblocks (along w nproc)
 
         "n_ene_per_sr_eql": 8,
         "n_sr_per_b_eql":   2,
@@ -83,7 +83,7 @@ options = {
         "do_grad": True,
         "orbital_rotation": False,
         "do_sr": True,
-        # "seed": 948836,
+        "seed": 250448,
 }
 sampling_interval = options['n_prop_steps'] * options['dt']
 print(f"Energy sampling interval: {sampling_interval}")
