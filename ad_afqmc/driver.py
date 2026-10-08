@@ -896,9 +896,26 @@ def afqmcGrad(
         if options["do_grad"]:
             # combined forward and backward pass
             # dlai: value_and_grad is more explicit than vjp
-            value, gradient = jax.value_and_grad(
+            value_and_grad_fn = jax.value_and_grad(
                 propagate_phaseless_wrapper, argnums=(0, 1), has_aux=True
-                )(rdm_op, rdm_2_op, prop_data)
+                )
+            
+            # dlai: print jaxpr and residuals to file for reference
+            if rank == 0 and n == 0:
+                with open("jaxpr.txt", "w") as f:
+                    f.write(
+                        jax.make_jaxpr(value_and_grad_fn)(rdm_op, rdm_2_op, prop_data)
+                        .pretty_print(use_color=False)
+                    )
+                def func(rdm_op, rdm_2_op):
+                    return propagate_phaseless_wrapper(rdm_op, rdm_2_op, prop_data)
+                import contextlib
+                from jax.ad_checkpoint import print_saved_residuals
+                with open("saved_residuals.txt", "w") as fout:
+                    with contextlib.redirect_stdout(fout):
+                        print_saved_residuals(func, rdm_op, rdm_2_op)
+
+            value, gradient = value_and_grad_fn(rdm_op, rdm_2_op, prop_data)
 
             # save values to disk
             block_energy_n, prop_data = value
