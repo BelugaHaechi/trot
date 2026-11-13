@@ -47,7 +47,7 @@ def time_to_sr(t):
 # Plot
 # ============================================================
 
-fig, ax = plt.subplots(figsize=(7, 5))
+fig, ax = plt.subplots(figsize=(5, 3))
 
 ax.errorbar(
     x,
@@ -73,7 +73,7 @@ ax.axhline(
     color="tab:red",
     linestyle="--",
     linewidth=1.5,
-    label="Reference, n = 31.2k, SR/AD = 50"
+    label="Reference, n = 31.2k, l = 20k"
 )
 
 ax.axhspan(
@@ -94,7 +94,7 @@ ax.axhline(
     color="tab:purple",
     linestyle="--",
     linewidth=1.5,
-    label="7-point finite difference, n = 8.8k, SR/AD = 50"
+    label="7-point finite difference, n = 8.8k, l = 20k"
 )
 
 ax.axhspan(
@@ -106,49 +106,42 @@ ax.axhspan(
 )
 
 
-# ============================================================
-# Equilibration line
-# ============================================================
+# # ============================================================
+# # Equilibration line
+# # ============================================================
 
-ax.axvline(
-    eq_sr,
-    color="tab:green",
-    linestyle="--",
-    linewidth=1.5
-)
+# ax.axvline(
+#     eq_sr,
+#     color="tab:green",
+#     linestyle="--",
+#     linewidth=1.5
+# )
 
-ax.annotate(
-    "eq phase = 80",
-    xy=(eq_sr, 0.97),
-    xycoords=("data", "axes fraction"),
-    xytext=(5, 0),
-    textcoords="offset points",
-    rotation=90,
-    va="top",
-    ha="left",
-    color="tab:green"
-)
+# ax.annotate(
+#     "eq phase = 80",
+#     xy=(eq_sr, 0.97),
+#     xycoords=("data", "axes fraction"),
+#     xytext=(5, 0),
+#     textcoords="offset points",
+#     rotation=90,
+#     va="top",
+#     ha="left",
+#     color="tab:green"
+# )
 
 
 # ============================================================
 # Axes
 # ============================================================
 
-ax.set_xlabel("SR intervals per AD")
-ax.set_ylabel("Force on atom 1")
+ax.set_xlabel("Propagation length / 1000")
+ax.set_ylabel("Energy derivative")
 
-# 0.05 total y range, centered roughly around reference
+# 0.05 total y range
 ax.set_ylim(
     force_ref - y_range / 2,
-    force_ref + y_range / 2
+    force_ref + y_range / 2.5
 )
-
-# Top x-axis
-secax = ax.secondary_xaxis(
-    "top",
-    functions=(sr_to_time, time_to_sr)
-)
-secax.set_xlabel("Imaginary time")
 
 ax.grid(alpha=0.2)
 ax.legend(frameon=False, fontsize=8)
