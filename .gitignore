@@ -5,3 +5,4 @@
 *.txt
 FCIDUMP_chol
 /testgrad
+/runs

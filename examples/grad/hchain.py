@@ -12,52 +12,21 @@ from ad_afqmc import run_afqmc, grad_utils
 
 """
 Compute ph-AFQMC nuclear gradients for a hydrogen chain.
-
-All parameters set to reproduce Jo's paper.
-
-System
-- basis:            sto-6g
-- bond length:      1.6 au (close to eql)
-- density fitting:  CDERI form
-
-AFQMC
-- 1p basis:         Lowdin orthon AO
-- tot walkers:      200                 response paper: 12500 samples, 36 cores
-    - processes:        20
-        - OK my pc probably can't launch that many procs
-    - walkers per proc: 10
-- timestep:         0.01
-- sr interval:      1.0
-    - tradeoff: infreq sr = less biased but more uncertain
-
-- total time:       25.0 response paper
-
-FD Integral Derivs
-- scheme:           central diff
-- perturbation:     1e-5
-
-Hardware:
-- gpu:              nvidia A100
-- cpu:              20-core Intel Xeon
-
-Results:
-- time cost (cpu):  8-10x   3-4x (response)
-- time cost (gpu):  2-4x
-- max size til oom: 84 H
-- see fig 5 for scaling
 """
 
 rH = 1.8
 nH = 2
+BASIS = "sto-6g"
+AUXBASIS_SPECFIC = None # None=default, alt: "def2-svp-jkfit"
+# WARN: sto6g does not have predefined auxbasis, see pyscf.df.addons
+# using sto3g and 321g's default, which should be reasonable
+
 atom_symbols = np.array(["H"] * nH)
 coords = np.zeros((nH, 3))
 coords[:, 2] = np.arange(nH) * rH
-
 atomstring = list(zip(atom_symbols, coords))
-mol = gto.M(atom=atomstring, basis="sto-6g", verbose=3, unit="bohr")
-mf = scf.RHF(mol).density_fit()#auxbasis="def2-svp-jkfit")
-# WARN: sto6g does not have predefined auxbasis, see pyscf.df.addons
-# using sto3g and 321g's default, which should be reasonable
+mol = gto.M(atom=atomstring, basis=BASIS, verbose=3, unit="bohr")
+mf = scf.RHF(mol).density_fit(auxbasis=AUXBASIS_SPECFIC)
 mf.kernel() # pyright: ignore[reportAttributeAccessIssue]
 
 n_walkers_per_proc = 100
