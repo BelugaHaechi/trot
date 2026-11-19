@@ -116,24 +116,26 @@ def _block_scan_free(prop_data, _x, ham_data, propagator, trial, wave_data):
     block_weight = jnp.sum(prop_data["overlaps"])
     return prop_data, (prop_data, block_energy, block_weight)
 
+N_ENE_PER_CKPT = 2
+# value 1 = original, unchanged 
 
-# @partial(jit, static_argnames=("propagator", "trial"))
-# def _ckpt_block_scan(prop_data, _x, ham_data, propagator, trial, wave_data):
-#     """Propagate exactly nE/CKPT E-blocks. To be checkpointed."""
-#     prop_data, (block_energy, block_weight) = lax.scan(
-#         partial(
-#             _block_scan,
-#             ham_data=ham_data,
-#             propagator=propagator,
-#             trial=trial,
-#             wave_data=wave_data,
-#         ),
-#         prop_data,
-#         None,
-#         length=4, # nE/CKPT
-#     )
+@partial(jit, static_argnames=("propagator", "trial"))
+def _ckpt_block_scan(prop_data, _x, ham_data, propagator, trial, wave_data):
+    """Propagate exactly nE/CKPT E-blocks. To be checkpointed."""
+    prop_data, (block_energy, block_weight) = lax.scan(
+        partial(
+            _block_scan,
+            ham_data=ham_data,
+            propagator=propagator,
+            trial=trial,
+            wave_data=wave_data,
+        ),
+        prop_data,
+        None,
+        length=N_ENE_PER_CKPT,
+    )
 
-#     return prop_data, (block_energy, block_weight)
+    return prop_data, (block_energy, block_weight)
 
 
 # custom checkpointed version
@@ -152,16 +154,16 @@ def _sr_block_scan(prop_data, _x, ham_data, propagator, trial, wave_data):
     - propagate_phaseless_wrapper       vanilla ph-AFQMC
     """
     prop_data, (block_energy, block_weight) = lax.scan(
-        checkpoint(partial(_block_scan,
+        checkpoint(partial(_ckpt_block_scan,
             ham_data=ham_data, propagator=propagator, trial=trial, wave_data=wave_data)),
         prop_data,
         None,
-        length=propagator.n_ene_blocks, # // 4, # for nE/CKPT
+        length=propagator.n_ene_blocks // N_ENE_PER_CKPT,
     )
 
-    # # flatten the extra ckpt dimension
-    # block_energy = block_energy.reshape((-1, *block_energy.shape[2:]))
-    # block_weight = block_weight.reshape((-1, *block_weight.shape[2:]))
+    # flatten the extra ckpt dimension
+    block_energy = block_energy.reshape((-1, *block_energy.shape[2:]))
+    block_weight = block_weight.reshape((-1, *block_weight.shape[2:]))
 
     prop_data = propagator.stochastic_reconfiguration_local(prop_data)
     prop_data["overlaps"] = trial.calc_overlap_vmap(prop_data["walkers"], wave_data)
