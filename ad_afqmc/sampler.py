@@ -33,12 +33,26 @@ def _step_scan_free(prop_data, fields, ham_data, propagator, trial, wave_data):
     return prop_data, fields
 
 
-N_STEPS_PER_CKPT = 1
+N_STEPS_PER_CKPT = 25
 # value 1 = original, unchanged
 
 @partial(jit, static_argnames=("propagator", "trial"))
-def _ckpt_step_scan(prop_data, fields, ham_data, propagator, trial, wave_data):
-    """Propagate exactly N_STEPS_PER_CKPT steps. To be checkpointed."""
+def _ckpt_step_scan(prop_data, _x, ham_data, propagator, trial, wave_data):
+    """Propagate exactly N_STEPS_PER_CKPT steps. To be checkpointed.
+    WARN: This impl changes the random number generation!
+    Because the random fields are generated are now generated per CS block.
+    This is necessary to prevent random fields from being saved as residuals,
+    which will take up a huge amount of memory, larger than any residual.
+    """
+    prop_data["key"], subkey = random.split(prop_data["key"])
+    fields = random.normal(
+        subkey,
+        shape=(
+            N_STEPS_PER_CKPT,
+            propagator.n_walkers,
+            ham_data["chol"].shape[0],
+        ),
+    )
     prop_data, _ = lax.scan(
         partial(_step_scan,
             ham_data=ham_data, propagator=propagator, trial=trial, wave_data=wave_data),
@@ -69,31 +83,28 @@ def _block_scan(prop_data, _x, ham_data, propagator, trial, wave_data):
     - by _sr_block_scan()       this is the "sr-block", one level up
     - by each nosr variant of phaseless_wrapper         when "sr-block" isn't needed
     """
-    prop_data["key"], subkey = random.split(prop_data["key"])
-    fields = random.normal(
-        subkey,
-        shape=(
-            propagator.n_prop_steps,
-            propagator.n_walkers,
-            ham_data["chol"].shape[0],
-        ),
-    )
-    # reshape fields into checkpoint-sized chunks
-    fields = fields.reshape(
-        (
-            propagator.n_prop_steps // N_STEPS_PER_CKPT,
-            N_STEPS_PER_CKPT,
-            propagator.n_walkers,
-            ham_data["chol"].shape[0],
-        )
-    )
+    # # original implementation, generate all fields
+    # prop_data["key"], subkey = random.split(prop_data["key"])
+    # fields = random.normal(
+    #     subkey,
+    #     shape=(
+    #         propagator.n_prop_steps,
+    #         propagator.n_walkers,
+    #         ham_data["chol"].shape[0],
+    #     ),
+    # )
+    # prop_data, _ = lax.scan(
+    #     partial(_step_scan,
+    #         ham_data=ham_data, propagator=propagator, trial=trial, wave_data=wave_data),
+    #     prop_data,
+    #     fields
+    # )
     prop_data, _ = lax.scan(
-        # partial(_ckpt_step_scan, # _step_scan,
-        #     ham_data=ham_data, propagator=propagator, trial=trial, wave_data=wave_data),
-        checkpoint(partial(_ckpt_step_scan, # _step_scan,
+        checkpoint(partial(_ckpt_step_scan,
             ham_data=ham_data, propagator=propagator, trial=trial, wave_data=wave_data)),
         prop_data,
-        fields,
+        None,
+        length=propagator.n_prop_steps // N_STEPS_PER_CKPT,
     )
     prop_data["n_killed_walkers"] += prop_data["weights"].size - jnp.count_nonzero(
         prop_data["weights"]
