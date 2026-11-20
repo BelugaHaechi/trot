@@ -3,6 +3,12 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import MultipleLocator
 import sys
 
+"""
+Plot memory time log format from memwatch.py
+Command line tool, argument: PID in filename formatted as PID.csv
+"""
+
+
 root_pid = int(sys.argv[1])
 
 df = pd.read_csv(f"{root_pid}.csv")
