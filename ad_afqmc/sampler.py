@@ -33,6 +33,21 @@ def _step_scan_free(prop_data, fields, ham_data, propagator, trial, wave_data):
     return prop_data, fields
 
 
+N_STEPS_PER_CKPT = 1
+# value 1 = original, unchanged
+
+@partial(jit, static_argnames=("propagator", "trial"))
+def _ckpt_step_scan(prop_data, fields, ham_data, propagator, trial, wave_data):
+    """Propagate exactly N_STEPS_PER_CKPT steps. To be checkpointed."""
+    prop_data, _ = lax.scan(
+        partial(_step_scan,
+            ham_data=ham_data, propagator=propagator, trial=trial, wave_data=wave_data),
+        prop_data,
+        fields,
+    )
+    return prop_data, None
+
+
 @partial(jit, static_argnames=("propagator", "trial"))
 def _block_scan(prop_data, _x, ham_data, propagator, trial, wave_data):
     """
@@ -63,9 +78,20 @@ def _block_scan(prop_data, _x, ham_data, propagator, trial, wave_data):
             ham_data["chol"].shape[0],
         ),
     )
+    # reshape fields into checkpoint-sized chunks
+    fields = fields.reshape(
+        (
+            propagator.n_prop_steps // N_STEPS_PER_CKPT,
+            N_STEPS_PER_CKPT,
+            propagator.n_walkers,
+            ham_data["chol"].shape[0],
+        )
+    )
     prop_data, _ = lax.scan(
-        partial(_step_scan,
-            ham_data=ham_data, propagator=propagator, trial=trial, wave_data=wave_data),
+        # partial(_ckpt_step_scan, # _step_scan,
+        #     ham_data=ham_data, propagator=propagator, trial=trial, wave_data=wave_data),
+        checkpoint(partial(_ckpt_step_scan, # _step_scan,
+            ham_data=ham_data, propagator=propagator, trial=trial, wave_data=wave_data)),
         prop_data,
         fields,
     )
@@ -116,8 +142,9 @@ def _block_scan_free(prop_data, _x, ham_data, propagator, trial, wave_data):
     block_weight = jnp.sum(prop_data["overlaps"])
     return prop_data, (prop_data, block_energy, block_weight)
 
-N_ENE_PER_CKPT = 2
-# value 1 = original, unchanged 
+
+N_ENE_PER_CKPT = 1
+# value 1 = original, unchanged
 
 @partial(jit, static_argnames=("propagator", "trial"))
 def _ckpt_block_scan(prop_data, _x, ham_data, propagator, trial, wave_data):
@@ -154,8 +181,10 @@ def _sr_block_scan(prop_data, _x, ham_data, propagator, trial, wave_data):
     - propagate_phaseless_wrapper       vanilla ph-AFQMC
     """
     prop_data, (block_energy, block_weight) = lax.scan(
-        checkpoint(partial(_ckpt_block_scan,
-            ham_data=ham_data, propagator=propagator, trial=trial, wave_data=wave_data)),
+        partial(_ckpt_block_scan,
+            ham_data=ham_data, propagator=propagator, trial=trial, wave_data=wave_data),
+        # checkpoint(partial(_ckpt_block_scan,
+        #     ham_data=ham_data, propagator=propagator, trial=trial, wave_data=wave_data)),
         prop_data,
         None,
         length=propagator.n_ene_blocks // N_ENE_PER_CKPT,
@@ -219,6 +248,8 @@ def _ad_block(prop_data, ham_data, propagator, trial, wave_data):
     prop_data, (block_energy, block_weight) = lax.scan(
         partial(_sr_block_scan,
             ham_data=ham_data, propagator=propagator, trial=trial, wave_data=wave_data),
+        # checkpoint(partial(_sr_block_scan,
+        #     ham_data=ham_data, propagator=propagator, trial=trial, wave_data=wave_data)),
         prop_data, None,
         length=propagator.n_sr_blocks,
     )
