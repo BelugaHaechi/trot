@@ -1,5 +1,6 @@
 from functools import partial
 from functools import reduce
+import sys
 print = partial(print, flush=True)
 
 import numpy as np
@@ -29,7 +30,7 @@ mol = gto.M(atom=atomstring, basis=BASIS, verbose=3, unit="bohr")
 mf = scf.RHF(mol).density_fit(auxbasis=AUXBASIS_SPECFIC)
 mf.kernel() # pyright: ignore[reportAttributeAccessIssue]
 
-n_walkers_per_proc = 100
+n_walkers_per_proc = int(sys.argv[1])
 nproc = 4
 n_walkers_tot = nproc * n_walkers_per_proc
 print(f"Total walkers: {n_walkers_tot}")

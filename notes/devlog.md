@@ -113,6 +113,14 @@ python /home/dsl44/trot/ad_afqmc/memwatch.py <PID>
 
 back to the first terminal: input Enter to begin
 
+after done:
+read output from memwatch.py, note Peak PSS
+to generate graph:
+python /home/dsl44/trot/plot/memory.py <PID>
+
+Tip: can replace the independent (experimental) variable with 
+`int(sys.argv[1])` to conveniently specify it through command line.
+
 
 ## 10/9/2025 Verification of effects of "orbital rotation"
 
@@ -399,7 +407,38 @@ What we DO care about: Peak memory cost vs scale
     OK great! So let's just move on to scaling.
 
 
-## 11/19
+## 11/19, 11/20
 4. Extend walker number scaling argument
 - let's go back to H2, try different ckpt intervals
 - aim is to have more lines in the graph instead of just 400 and 50
+
+Done. Tested 50,100,200,400,600,800 walkers for H2 STO-6G
+For checkpointing freqs 1,2,5,10,25,50,100,200,400,None(8000)
+There were also 2 types of 50, because the E-block has length 50, you can either checkpoint before the energy sampling postprocessing step (within the E-block), or checkpoint the entire E-block (after energy sampling).
+Obviously the former would take more memory because of the relatively large intermediates during postprocessing. We call this case 50dt (or 50b).
+Still, this comparison is useful because then we can see exactly how much memory is used by saving postprocessing residuals, which is always done for 1,2,5,10,25 cases (because shorter than 50). This partially explains why these are quite memory-heavy and less optimal compared to 50.
+
+In this process, pre-E checkpointing used to be even more expensive!
+For 800 walkers, used 4+ GB more than post-E. To find out why, I looked at saved residuals, and found that the culprit was that it was saving all of the random fields, which is even more expensive than the walkers. This cut 1GB from each process.
+Perhaps this can be further optimized, because dt50 additionaly saves
+c128[20,8,1,800,18,1,1]
+I wonder where this 18 (Cholesky) is coming from...
+OK some discussion with Chat suggests that it might be from `trial.calc_overlap_vmap`. Resonable, should try checkpointing that as well.
+
+Made a nice graph called memory-ckpt-nw. Hid 10 and 50b because they were very close together along with 25. Notably no checkpointing uses so much memory that it has to be put in a subplot, which is good because it demonstrates how checkpointing is essential.
+
+
+
+
+
+FUTURE: Extract wall time information as well. Use statistical averages for EQ and SP steps, we have 10 and 4 samples. The SP is important.
+This would be annoying to do by hand, so make a throwaway code for it.
+Add try catch because sometimes the out files could be corrupted.
+
+FUTURE: Benchmark on system size.
+
+FUTURE: Analysis and reverse engineer scaling of A and B.
+Derive optimal adaptive strategy. Verify.
+
+FUTURE: Use code to attempt larger systems as showcase. For publication.
+
