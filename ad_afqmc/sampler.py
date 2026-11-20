@@ -33,7 +33,7 @@ def _step_scan_free(prop_data, fields, ham_data, propagator, trial, wave_data):
     return prop_data, fields
 
 
-N_STEPS_PER_CKPT = 25
+N_STEPS_PER_CKPT = 5
 # value 1 = original, unchanged
 
 @partial(jit, static_argnames=("propagator", "trial"))
@@ -83,7 +83,7 @@ def _block_scan(prop_data, _x, ham_data, propagator, trial, wave_data):
     - by _sr_block_scan()       this is the "sr-block", one level up
     - by each nosr variant of phaseless_wrapper         when "sr-block" isn't needed
     """
-    # # original implementation, generate all fields
+    # # original impl: use when no step-ckpt needed
     # prop_data["key"], subkey = random.split(prop_data["key"])
     # fields = random.normal(
     #     subkey,
@@ -99,6 +99,7 @@ def _block_scan(prop_data, _x, ham_data, propagator, trial, wave_data):
     #     prop_data,
     #     fields
     # )
+    # # end of original impl
     prop_data, _ = lax.scan(
         checkpoint(partial(_ckpt_step_scan,
             ham_data=ham_data, propagator=propagator, trial=trial, wave_data=wave_data)),
