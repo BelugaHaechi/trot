@@ -442,3 +442,29 @@ Derive optimal adaptive strategy. Verify.
 
 FUTURE: Use code to attempt larger systems as showcase. For publication.
 
+
+## 11/22
+
+Was looking at saved residuals in CS50, thinking about the remaining discrepancy between CS50 and CE1. Even after cutting 1GB off (no more saving random fields), there is still a 0.5GB gap (3.0GB vs 2.6GB).
+
+Turns out it could be optimized further, see dt50' and dt50".
+Basically the energy evaluation is the second most expensive task, and it could also be checkpointed. (dt50')
+Furthermore, the orthonormalization and overlap calculations are the third most expensive (adds constant to leading term), so if we checkpoint all 3 postprocessing steps, we save the most memory. (dt50")
+
+Technically, to make it a fair comparison between CS and CE, I should rerun the computations with dt"...
+FUTURE: Run CS" 1/2/5/10/25/50, which is a total of 36 runs... at this point we need to automate this
+
+But also, it's not a priority. Let's do other experiements first before coming back to fix this.
+
+
+## 11/23
+
+Gathering walltime data from the previous experiment ckpt-vs-nw. Made graph for it as well.
+
+Found anomaly with 8000/600, it was much slower than even 8000/800, turned out it because of OOM and it was using swap space
+which is really slow. TODO: rerun 8000/600 with larger memory node, when available
+
+also rerun 50/800, shows a diff trend than expected
+
+Then, move on to system size. Time to make the automation
+
