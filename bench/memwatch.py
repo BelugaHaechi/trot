@@ -2,9 +2,25 @@ import os
 import sys
 import time
 import csv
+import argparse
+import json
 
-root_pid = int(sys.argv[1])
-interval = 0.5
+"""
+Monitor memory usage of a process and its descendants in real time.
+- PID: root process ID.
+- interval (-t): sampling interval in seconds (default: 0.5).
+- Records RSS, PSS, and peak PSS to a CSV file.
+- Live terminal display (disabled when stdout is redirected).
+- Terminates automatically when the root process exits.
+"""
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("pid", type=int)
+parser.add_argument("-t", "--interval", type=float, default=0.5)
+args = parser.parse_args()
+
+root_pid = args.pid
+interval = args.interval
 
 peak_pss_kb = 0
 peak_rss_kb = 0
@@ -13,7 +29,7 @@ process_peaks = {}
 start_time = time.monotonic()
 lines_printed = 0
 
-csv_path = f"{root_pid}.csv"
+csv_path = f"memlog.csv"
 
 
 def descendants(root):
@@ -150,6 +166,10 @@ with open(csv_path, "w", newline="", buffering=1) as csvfile:
         # Terminal display
         # ----------------------------------------
 
+        if not sys.stdout.isatty():
+            time.sleep(interval)
+            continue # skip display if redirected to file
+
         elapsed_int = int(elapsed)
         hours, rem = divmod(elapsed_int, 3600)
         minutes, seconds = divmod(rem, 60)
@@ -200,16 +220,25 @@ with open(csv_path, "w", newline="", buffering=1) as csvfile:
 
 elapsed = time.monotonic() - start_time
 
-print("\nProcess finished.")
-print(f"Elapsed time: {elapsed:.1f} s")
-print(f"Peak total PSS: {peak_pss_kb / 1024**2:.2f} GiB")
-print(f"Peak total RSS: {peak_rss_kb / 1024**2:.2f} GiB")
-print(f"Data saved to: {csv_path}")
+summary = {
+    "elapsed_s": elapsed,
+    "peak_pss_gib": peak_pss_kb / 1024**2,
+    "peak_rss_gib": peak_rss_kb / 1024**2,
+    "process_peak_pss_gib": {
+        pid: peak / 1024**2
+        for pid, peak in sorted(process_peaks.items())
+    },
+}
 
-print("\nPer-process peak PSS:")
-for pid, peak in sorted(
-    process_peaks.items(),
-    key=lambda x: x[1],
-    reverse=True,
-):
-    print(f"  {pid:8d}: {peak / 1024**2:.2f} GiB")
+with open("memtot.json", "w") as f:
+    json.dump(summary, f, indent=4)
+
+print()
+print("Process finished.")
+for key, value in summary.items():
+    if isinstance(value, dict):
+        print(f"{key}:")
+        for pid, peak in value.items():
+            print(f"    {pid}: {peak:.3f}")
+    else:
+        print(f"{key}: {value:.3f}")

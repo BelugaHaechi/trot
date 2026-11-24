@@ -468,3 +468,19 @@ also rerun 50/800, shows a diff trend than expected
 
 Then, move on to system size. Time to make the automation
 
+## 11/24 Automation
+
+Created bench/ series of scripts, moving hchain and memwatch here.
+Made hchain fully command line, and integration with CSV (launch) and SLURM (batch)
+
+USAGE
+
+sbatch bench/batch.sh bench/hchain.py jobs/JOBNAME.csv
+
+The script automatically hooks up the conda env and python path
+
+
+
+
+
+
