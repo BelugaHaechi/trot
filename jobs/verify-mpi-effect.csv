@@ -1,0 +1,5 @@
+id,workdir,n_proc,n_walkers
+1,runs/verify-mpi-effect/1,1,400
+2,runs/verify-mpi-effect/2,2,200
+3,runs/verify-mpi-effect/4,4,100
+4,runs/verify-mpi-effect/8,8,50

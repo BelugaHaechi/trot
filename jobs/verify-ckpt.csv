@@ -1,0 +1,4 @@
+id,workdir,n_proc,n_walkers,n_steps_per_ckpt,n_ene_per_ckpt,do_sr_ckpt
+1,runs/verify-ckpt/CS5,4,100,5,0,False
+2,runs/verify-ckpt/CSR400,4,100,0,0,True
+3,runs/verify-ckpt/None,4,100,0,0,False
