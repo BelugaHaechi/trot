@@ -68,6 +68,22 @@ class propagator:
     do_sr_ckpt: bool = False
     do_eval_ckpt: bool = False
 
+    # Validate checkpointing options
+    def __post_init__(self):
+        if self.n_steps_per_ckpt < 0:
+            raise ValueError("n_steps_per_ckpt must be nonnegative")
+
+        if self.n_ene_per_ckpt < 0:
+            raise ValueError("n_ene_per_ckpt must be nonnegative")
+
+        if self.n_steps_per_ckpt:
+            if self.n_prop_steps % self.n_steps_per_ckpt:
+                raise ValueError("n_prop_steps must be divisible by n_steps_per_ckpt")
+
+        if self.n_ene_per_ckpt:
+            if self.n_ene_blocks % self.n_ene_per_ckpt:
+                raise ValueError("n_ene_blocks must be divisible by n_ene_per_ckpt")
+
     def init_prop_data(self, trial: wavefunctions.wave_function, wave_data,
                              ham: hamiltonian.hamiltonian, ham_data, init_walkers=None):
         """

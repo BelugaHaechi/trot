@@ -33,12 +33,9 @@ def _step_scan_free(prop_data, fields, ham_data, propagator, trial, wave_data):
     return prop_data, fields
 
 
-N_STEPS_PER_CKPT = 5
-# value 1 = original, unchanged
-
 @partial(jit, static_argnames=("propagator", "trial"))
 def _ckpt_step_scan(prop_data, _x, ham_data, propagator, trial, wave_data):
-    """Propagate exactly N_STEPS_PER_CKPT steps. To be checkpointed.
+    """Propagate exactly nS/CKPT steps. To be checkpointed.
     WARN: This impl changes the random number generation!
     Because the random fields are generated are now generated per CS block.
     This is necessary to prevent random fields from being saved as residuals,
@@ -48,7 +45,7 @@ def _ckpt_step_scan(prop_data, _x, ham_data, propagator, trial, wave_data):
     fields = random.normal(
         subkey,
         shape=(
-            N_STEPS_PER_CKPT,
+            propagator.n_steps_per_ckpt,
             propagator.n_walkers,
             ham_data["chol"].shape[0],
         ),
@@ -83,38 +80,62 @@ def _block_scan(prop_data, _x, ham_data, propagator, trial, wave_data):
     - by _sr_block_scan()       this is the "sr-block", one level up
     - by each nosr variant of phaseless_wrapper         when "sr-block" isn't needed
     """
-    # # original impl: use when no step-ckpt needed
-    # prop_data["key"], subkey = random.split(prop_data["key"])
-    # fields = random.normal(
-    #     subkey,
-    #     shape=(
-    #         propagator.n_prop_steps,
-    #         propagator.n_walkers,
-    #         ham_data["chol"].shape[0],
-    #     ),
-    # )
-    # prop_data, _ = lax.scan(
-    #     partial(_step_scan,
-    #         ham_data=ham_data, propagator=propagator, trial=trial, wave_data=wave_data),
-    #     prop_data,
-    #     fields
-    # )
-    # # end of original impl
-    prop_data, _ = lax.scan(
-        checkpoint(partial(_ckpt_step_scan,
-            ham_data=ham_data, propagator=propagator, trial=trial, wave_data=wave_data)),
-        prop_data,
-        None,
-        length=propagator.n_prop_steps // N_STEPS_PER_CKPT,
-    )
+    if propagator.n_steps_per_ckpt:
+        # Step-level checkpointing: generate random fields inside each checkpoint.
+        scanned_fn = checkpoint(partial(
+            _ckpt_step_scan,
+            ham_data=ham_data, propagator=propagator,
+            trial=trial, wave_data=wave_data,
+        ))
+
+        prop_data, _ = lax.scan(
+            scanned_fn,
+            prop_data, None,
+            length=propagator.n_prop_steps // propagator.n_steps_per_ckpt,
+        )
+
+    else:
+        # Original implementation: generate fields per E-block.
+        # We retain this for reproducibility of random fields.
+        # Note this bypasses _ckpt_step_scan altogether
+        prop_data["key"], subkey = random.split(prop_data["key"])
+        fields = random.normal(
+            subkey,
+            shape=(
+                propagator.n_prop_steps,
+                propagator.n_walkers,
+                ham_data["chol"].shape[0],
+            ),
+        )
+
+        prop_data, _ = lax.scan(
+            partial(
+                _step_scan,
+                ham_data=ham_data, propagator=propagator,
+                trial=trial, wave_data=wave_data,
+            ),
+            prop_data,
+            fields,
+        )
+
     prop_data["n_killed_walkers"] += prop_data["weights"].size - jnp.count_nonzero(
         prop_data["weights"]
     )
-    prop_data = propagator.orthonormalize_walkers(prop_data)
-    prop_data["overlaps"] = trial.calc_overlap_vmap(prop_data["walkers"], wave_data)
-    energy_samples = jnp.real(
-        trial.calc_energy_vmap(ham_data, prop_data["walkers"], wave_data)
-    ) # computes local energy of all walkers
+
+    def _evaluate_walkers(prop_data, ham_data, wave_data):
+        prop_data = propagator.orthonormalize_walkers(prop_data)
+        prop_data["overlaps"] = trial.calc_overlap_vmap(prop_data["walkers"], wave_data)
+        energy_samples = jnp.real(trial.calc_energy_vmap(
+            ham_data, prop_data["walkers"], wave_data))
+        return prop_data, energy_samples
+    
+    # checkpoint to avoid saving multiple instances of walkers, which is the leading residual
+    # automatically enable for step-level checkpointing, otherwise very wasteful
+    if propagator.do_eval_ckpt or propagator.n_steps_per_ckpt:
+        _evaluate_walkers = checkpoint(_evaluate_walkers)
+
+    prop_data, energy_samples = _evaluate_walkers(prop_data, ham_data, wave_data)
+
     energy_samples = jnp.where(
         jnp.abs(energy_samples - prop_data["pop_control_ene_shift"])
         > jnp.sqrt(2.0 / propagator.dt),
@@ -155,9 +176,6 @@ def _block_scan_free(prop_data, _x, ham_data, propagator, trial, wave_data):
     return prop_data, (prop_data, block_energy, block_weight)
 
 
-N_ENE_PER_CKPT = 1
-# value 1 = original, unchanged
-
 @partial(jit, static_argnames=("propagator", "trial"))
 def _ckpt_block_scan(prop_data, _x, ham_data, propagator, trial, wave_data):
     """Propagate exactly nE/CKPT E-blocks. To be checkpointed."""
@@ -171,7 +189,7 @@ def _ckpt_block_scan(prop_data, _x, ham_data, propagator, trial, wave_data):
         ),
         prop_data,
         None,
-        length=N_ENE_PER_CKPT,
+        length=propagator.n_ene_per_ckpt or 1, # if no ene ckpting, fall back to 1
     )
 
     return prop_data, (block_energy, block_weight)
@@ -192,14 +210,18 @@ def _sr_block_scan(prop_data, _x, ham_data, propagator, trial, wave_data):
     - _ad_block                         used in each SR-enabled variante of ad/nucgrad ph-AFQMC
     - propagate_phaseless_wrapper       vanilla ph-AFQMC
     """
+    scanned_fn = partial(_ckpt_block_scan,
+        ham_data=ham_data, propagator=propagator, trial=trial, wave_data=wave_data)
+    length = propagator.n_ene_blocks
+
+    if propagator.n_ene_per_ckpt:
+        scanned_fn = checkpoint(scanned_fn)
+        length //= propagator.n_ene_per_ckpt
+
     prop_data, (block_energy, block_weight) = lax.scan(
-        partial(_ckpt_block_scan,
-            ham_data=ham_data, propagator=propagator, trial=trial, wave_data=wave_data),
-        # checkpoint(partial(_ckpt_block_scan,
-        #     ham_data=ham_data, propagator=propagator, trial=trial, wave_data=wave_data)),
-        prop_data,
-        None,
-        length=propagator.n_ene_blocks // N_ENE_PER_CKPT,
+        scanned_fn,
+        prop_data, None,
+        length=length,
     )
 
     # flatten the extra ckpt dimension
@@ -257,11 +279,15 @@ def _ad_block(prop_data, ham_data, propagator, trial, wave_data):
     prop_data["overlaps"] = trial.calc_overlap_vmap(prop_data["walkers"], wave_data)
     prop_data["n_killed_walkers"] = 0
     prop_data["pop_control_ene_shift"] = prop_data["e_estimate"]
+
+    scanned_fn = partial(_sr_block_scan,
+        ham_data=ham_data, propagator=propagator, trial=trial, wave_data=wave_data)
+
+    if propagator.do_sr_ckpt:
+        scanned_fn = checkpoint(scanned_fn)
+
     prop_data, (block_energy, block_weight) = lax.scan(
-        partial(_sr_block_scan,
-            ham_data=ham_data, propagator=propagator, trial=trial, wave_data=wave_data),
-        # checkpoint(partial(_sr_block_scan,
-        #     ham_data=ham_data, propagator=propagator, trial=trial, wave_data=wave_data)),
+        scanned_fn,
         prop_data, None,
         length=propagator.n_sr_blocks,
     )
