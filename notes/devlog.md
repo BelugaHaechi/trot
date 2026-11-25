@@ -503,7 +503,7 @@ Also supports list of partitions now. (Simple impl)
 
 OK my AI was able to give a very good summary, after reviewing it here it is:
 
-## 1. Benchmark automation
+### 1. Benchmark automation
 
 Developed a modular benchmarking framework:
 
@@ -538,7 +538,7 @@ Additional features:
 
 The framework is largely independent of AFQMC and can be reused for other computational projects.
 
-## 2. MPI scaling experiment
+### 2. MPI scaling experiment
 
 Investigated the trade-off between MPI parallelism and replicated memory overhead.
 
@@ -562,7 +562,7 @@ Observations:
 
 **Decision:** Retain four MPI ranks for the walker-population benchmarks. Reconsider the optimal rank count for larger systems.
 
-### Memory monitoring bug under Slurm
+#### Memory monitoring bug under Slurm
 
 Initially, memwatch reported approximately 0.21 GiB regardless of MPI rank count.
 
@@ -574,7 +574,7 @@ Fixed by setting:
 
 This restores local process ancestry for single-node execution, allowing memwatch to capture the MPI workers.
 
-## 3. Generalized checkpointing implementation
+### 3. Generalized checkpointing implementation
 
 Removed hardcoded checkpointing intervals and introduced configurable checkpointing through the propagator dataclass.
 
@@ -594,7 +594,7 @@ Implementation changes:
 
 CS requires a different random field generation scheme, generating fields within each checkpoint rather than across the entire E-block. Consequently, different CS intervals may produce different random trajectories.
 
-### Improved CS″ strategy
+#### Improved CS″ strategy
 
 Combined walker orthonormalization, overlap evaluation, and local energy evaluation into one checkpointed function.
 
@@ -615,7 +615,7 @@ Previous measurements at 800 walkers/rank:
 
 Plain CS is inefficient because evaluation residuals accumulate across all E-blocks. Combined evaluation checkpointing replaces these large residuals with relatively compact input states.
 
-## 4. Explicit JAX compilation and runtime methodology
+### 4. Explicit JAX compilation and runtime methodology
 
 Identified systematic timing bias in the first sampling iteration and first two equilibration iterations.
 
@@ -625,7 +625,7 @@ Moved compilation and JAXPR/saved-residual diagnostics before the iteration-0 ti
 
 This separates compilation costs from recurring execution costs without discarding timing observations.
 
-### Propagation state bugs
+#### Propagation state bugs
 
 Explicit compilation exposed two inconsistencies previously hidden by automatic JIT recompilation:
 
@@ -636,7 +636,7 @@ Fixed by initializing the variable with a consistent floating-point dtype.
 
 The propagation state must preserve its pytree structure, shapes, and dtypes between calls to the compiled executable.
 
-## 5. Second-generation walker-population benchmark
+### 5. Second-generation walker-population benchmark
 
 Prepared jobs/ckpt-vs-nw-v2.csv and submitted the rerun series. Improvements:
 
@@ -656,7 +656,7 @@ Improved reproducibility: Explicit experiment parameters in CSV files, resolved 
 
 Correction of anomalous measurements: Rerun previously affected configurations, particularly the uncheckpointed high-population runs that experienced swapping and the anomalously slow CE50/800 run.
 
-## 6. TODO
+### 6. TODO
 
 Verify completion and correctness of the new benchmark series.
 
@@ -675,4 +675,66 @@ Investigate nested checkpointing for larger systems if necessary.
 Clarify computing-resource authorization after break.
 
 Eventually implement structured runtime output and a generic results collector.
+
+
+## 11/25
+
+Obtained rerun results. Plotted new graphs. There are some new findings!
+
+Because we have a lot of data, I created two versions of graphs: full and clean. The clean version is less cluttered.
+
+In terms of memory, the newly improved CS" strategy outperforms CE50! Only slightly, but the growth rate is a lot slower.
+
+Memory growth rate: MiB per walker/proc
+None    47
+CS400   2.73 (17x reduction)
+CE50    0.45 (6x reduction on top)
+CS10"   0.24 (1.9x reduction on top) total reduction: ~200x
+
+Note: CS without eval ckpt wouldn't be this efficient!
+
+Walltime: trend no longer that clear
+- Generally, reverse takes 2~3x the time of forward
+    - CS is 2.5x consistently
+    - None is 2.4x, CE50 is 2.5x, CE200 is 2.9x, CSR400 is 3x
+
+- CS checkpointing always has slower forward than no checkpointing (!)
+    - EXCEPT CS50, which is similar to CE/None
+    - CE checkpointing has the same forward time (basically indistinguishable)
+    - CS is slower probably because of the fragmented random field generation
+        - Except CS50, which generates together again!
+
+- CS checkpointing has a slower reverse than no checkpointing
+    - Looking at the full graph, the progression is like
+        - CS: 1 < 2 > 5 > 10 > 25 > 50
+        - CE: 50 < 100 = 200 = 400 < CSR400
+        - None less than all
+
+    - For CS, increasing the interval improves runtime, from +58% down to +7%
+        - Except CS1, which is about as fast as CS10 (+44%)
+    - For CE, the interval seems to have no effect, and is as slow as CS25 (+20%)
+        - Except CE50, which nearly as fast as None (+8%)
+    - CSR400 seems to introduce further overhead (+30%)
+
+    - Hypothesis for CS1 and CE50
+        - Checkpointing at natural algorithmic boundaries allows better compilation
+
+
+Plotted several more graphs. Notably:
+- Relative walltime increase. This graph is probably easier to read, shows that the multiple is about constant, between 2 and 4.
+- Relative memory reduction factor.
+    - Original graph wasn't as good, as it shows that the reduction factor increases!
+        - This is because of the large constant overhead that get diluted
+    - Intead, plotted growth factor reduction from linear regression. No distraction by the constant
+        - Wow, 150x reduction in total! (Not 200x because of regression)
+            - Rerunning the w200 still gave outlier (unexpectedly low, but that should inflate our reduction factor)
+- Tradeoff comparison: relative wall time increase vs relative memory reduction
+    - Very beautiful, illustrates the retrograde behavior of the optimization
+
+
+At this point, we are ready to proceed to system size scaling.
+
+
+## 11/25
+
 
