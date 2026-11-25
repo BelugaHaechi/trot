@@ -23,7 +23,7 @@ defaults = {
     "auxbasis": None,
 
     # Propagation
-    "n_proc": 1,
+    "n_proc": 4,
     "n_walkers": 100,
     "do_sr": True,
     "seed": 250448,

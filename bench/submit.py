@@ -11,6 +11,7 @@ Submit a SLURM job array using experiment specifications from a CSV file as defi
 - Launches jobs for every data row in the CSV
 - Default job name: CSV filename without extension
 - By default, allocates all CPU and memory in the node, read from partitions.csv
+    - If a list of partitions given, defaults are from the first partition listed
 - Default time limit: 1 day
 - SLURM logs are saved to .slurm_logs/job_name/JOBID-ARRAYID.log
 
@@ -26,7 +27,7 @@ with open("bench/partitions.csv") as f:
 parser = argparse.ArgumentParser()
 parser.add_argument("script")
 parser.add_argument("csv")
-parser.add_argument("partition", choices=partitions)
+parser.add_argument("partition")
 parser.add_argument("max_simul_tasks", type=int)
 
 parser.add_argument("--job-name", default=None)
@@ -35,14 +36,16 @@ parser.add_argument("--mem", default=None)
 parser.add_argument("--time", default="1-00:00:00")
 parser.add_argument("--array", default=None)
 
-parser.add_argument("--dry-run", action="store_true") # only assemble sbatch cmd
+parser.add_argument("-n", "--dry-run", action="store_true") # only assemble sbatch cmd
 
 args = parser.parse_args()
 
 job_name = args.job_name or Path(args.csv).stem
 logdir = Path("jobs/.slurm_logs") / job_name
 
-partition = partitions[args.partition]
+# if a list of partitions given, use default for the 1st one
+# this allows us to specify this without changing too mcuh stuff
+partition = partitions[args.partition.split(",")[0]]
 n_cpus = args.cpus_per_task or int(partition["n_cpus"])
 mem = args.mem or f'{partition["mem_slurm_mb"]}M'
 
