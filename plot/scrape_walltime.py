@@ -72,7 +72,8 @@ def analyze(path):
             sp[-1],
         ]
 
-    except Exception:
+    except Exception as e:
+        print(f"\nFailed: {path}: {e}")
         return [NAN] * 6
 
 
@@ -83,7 +84,7 @@ def main():
 
     prev_parent = None
 
-    with open("walltime.csv", "w", newline="") as f:
+    with open(f"walltime-{root.name}.csv", "w", newline="") as f:
         writer = csv.writer(f)
 
         writer.writerow([

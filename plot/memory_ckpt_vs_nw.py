@@ -39,8 +39,6 @@ for _, row in df.iterrows():
 for name, values in pss.items():
     print(f"{name:>6}: {np.round(values, 3)}")
 
-# Colors: strongest emphasis on CE50.
-# Alpha decreases for intervals farther from 50.
 styles = {
     "CS1":  ("#df7500", 1.0),
     "CS2":  ("#e67e00", 1.0),

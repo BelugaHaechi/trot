@@ -1,3 +1,4 @@
+import sys
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
@@ -11,7 +12,7 @@ from scipy.stats import t
 
 population = np.array([50, 100, 200, 400, 600, 800])
 
-df = pd.read_csv("walltime.csv", keep_default_na=False, na_values=["nan", ""])
+df = pd.read_csv(sys.argv[1], keep_default_na=False, na_values=["nan", ""])
 
 df["ckpt"] = df["relpath"].apply(
     lambda p: Path(p).parts[-3]
@@ -22,7 +23,20 @@ df["nw"] = df["relpath"].apply(
 
 df = df.set_index(["ckpt", "nw"])
 
-names = ["1", "5", "50", "200", "8000"]
+names = [
+    "CS1",
+    "CS2",
+    # "CS5",
+    "CS10",
+    # "CS25",
+    "CS50",
+    "CE50",
+    # "CE100",
+    "CE200",
+    # "CE400",
+    "CSR400",
+    "8000",
+]
 
 eq, sp = {}, {}
 ci_eq, ci_sp = {}, {}
@@ -47,38 +61,33 @@ for name in names:
         / np.sqrt(4)
     )
 
-# Colors: strongest emphasis on CE50.
-# Alpha decreases for intervals farther from 50.
-# styles = {
-#     "1":    ("darkorange", 0.5),
-#     "2":    ("darkorange", 0.6),
-#     "5":    ("darkorange", 0.7),
-#     "10":   ("darkorange", 0.8),
-#     "25":   ("darkorange", 0.8),
-#     "50b":  ("darkorange", 1.0),
+print("\nForward propagation (8000 steps):")
+for name, values in eq.items():
+    print(f"{name:>6}: {np.round(10 * values, 3)}")
 
-#     "50":   ("steelblue", 1.0),
-#     "100":  ("steelblue", 0.8),
-#     "200":  ("steelblue", 0.6),
-#     "400":  ("steelblue", 0.5),
+print("\nReverse-mode AD (8000 steps):")
+for name, values in sp.items():
+    print(f"{name:>6}: {np.round(values, 3)}")
 
-#     "None": ("darkred", 0.85),
-# }
+print("\nAD 95% CI half-width (s):")
+for name, values in ci_sp.items():
+    print(f"{name:>6}: {np.round(values, 3)}")
 
 styles = {
-    "1":    ("darkorange", 0.6),
-    "5":    ("darkorange", 1.0),
-    "50":   ("steelblue", 1.0),
-    "200":  ("steelblue", 0.6),
-    "8000": ("darkred", 0.85),
-}
+    "CS1":    ("#df7500", 1.0),
+    "CS2":    ("#e67e00", 1.0),
+    "CS5":    ("#f59016", 1.0),
+    "CS10":   ("#ffa638", 1.0),
+    "CS25":   ("#fa9b28", 1.0),
+    "CS50":   ("#ed8700", 1.0),
 
-x_offsets = {
-    "1":     -4,
-    "5":      4,
-    "50":     4,
-    "200":   -4,
-    "8000":   0,
+    "CE50":   ("#91bde0", 1.0),
+    "CE100":  ("#6096c4", 1.0),
+    "CE200":  ("#326da3", 1.0),
+    "CE400":  ("#174578", 1.0),
+
+    "CSR400": ("#174578", 1.0),
+    "8000":   ("darkred", 0.85),
 }
 
 fig, ax = plt.subplots(figsize=(8, 4.3))
@@ -89,32 +98,50 @@ for name, values in sp.items():
     color, alpha = styles[name]
 
     ax.errorbar(
-        population + x_offsets[name], y,
+        population, y,
         yerr=ci_sp[name],
-        fmt="o-",
+        fmt="-",
         color=color,
         alpha=alpha,
         markersize=3,
-        linewidth=2.2 if name == "50" else 1.5,
         elinewidth=0.8,
-        capsize=1.5,
-        capthick=0.8,
-        zorder=4 if name == "50" else 2,
+        capsize=2,
+        capthick=1.0,
+        linewidth=1.8 if name == "CS10" else 1.2,
+        zorder=4 if name == "CS10" else 2,
     )
 
-    if name == "8000": # no label for No checkpointing case
+    if name == "8000": # Hide label for no-ckpt
         continue
 
+    offsets = {
+        "CS10": (8,  3),
+        "CS1":  (8, -3),
+        "CE50": (8,  4),
+        "CS50": (8, -4),
+    }
+
     ax.annotate(
-        name,
+        name.lstrip("CESR"),
         xy=(population[-1], y[-1]),
-        xytext=(5, 0),
+        xytext=offsets.get(name, (5, 0)),
         textcoords="offset points",
         color=color,
         alpha=alpha,
         fontsize=9,
         va="center",
         annotation_clip=False,
+        arrowprops=(
+            dict(
+                arrowstyle="-",
+                color=color,
+                alpha=alpha,
+                lw=0.8,
+                shrinkA=0,
+                shrinkB=3,
+            )
+            if name in offsets else None
+        ),
     )
 
 ax.set_xlabel("Sampler population")
@@ -171,7 +198,7 @@ ax.legend(
 )
 
 plt.savefig(
-    "walltime-ckpt-nw.png",
+    "plot/walltime-ckpt-nw.png",
     dpi=300,
     bbox_inches="tight",
 )
