@@ -328,6 +328,24 @@ ax.set_ylim(0, 65)
 ax.grid(alpha=0.2)
 ax.set_axisbelow(True)
 
+groups = {
+    "CS": ["CS1", "CS2", "CS5", "CS10", "CS25", "CS50"],
+    "CE": ["CE50", "CE100", "CE200", "CE400"],
+}
+
+for group, names in groups.items():
+    names = [n for n in names if n in reduction and n in sp]
+
+    ax.plot(
+        [reduction[n] for n in names],
+        [100 * (sp[n][-1] / baseline - 1) for n in names],
+        "-",
+        color="darkorange" if group == "CS" else "steelblue",
+        alpha=0.3,
+        linewidth=1.8,
+        zorder=1,
+    )
+
 plt.savefig(
     "plot/tradeoff-ckpt-nw.png",
     dpi=300,
