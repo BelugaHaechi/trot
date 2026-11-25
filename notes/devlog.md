@@ -499,7 +499,180 @@ batch.sh - auto setup and schedule tasks in CSV
 submit.py - auto create the batch command
 
 
+Also supports list of partitions now. (Simple impl)
 
+OK my AI was able to give a very good summary, after reviewing it here it is:
 
+## 1. Benchmark automation
 
+Developed a modular benchmarking framework:
+
+- `hchain.py`: standalone AFQMC calculation with named CLI arguments and centralized defaults.
+- `memwatch.py`: automatic process-tree memory profiling.
+- `launch.py`: CSV-to-CLI translation, working directory creation, and concurrent execution of calculation and memory monitor.
+- `batch.sh`: Slurm execution environment setup.
+- `submit.py`: automatic generation of `sbatch` commands, job names, array ranges, and resource allocations.
+
+Repository organization:
+
+- `bench/`: benchmark and automation scripts.
+- `jobs/`: experiment specifications (CSV).
+- `jobs/.slurm_logs/`: scheduler and execution logs.
+- `runs/`: generated calculation results.
+- `plot/`: analysis and visualization.
+
+Each run automatically produces:
+
+- `options.json`: fully resolved calculation parameters.
+- `memlog.csv`: time-resolved RSS and PSS measurements.
+- `memtot.json`: peak total RSS/PSS, elapsed time, and per-process peak PSS.
+- `.out`: combined scientific stdout and stderr.
+
+Additional features:
+
+- Multi-partition submission.
+- Resource defaults from a local partition CSV, using the first specified partition.
+- Dry-run support (`-n`).
+- Automatic creation of output directories.
+- Boolean CLI argument support.
+
+The framework is largely independent of AFQMC and can be reused for other computational projects.
+
+## 2. MPI scaling experiment
+
+Investigated the trade-off between MPI parallelism and replicated memory overhead.
+
+Settings: H2/STO-6G, CE50, 400 total walkers.
+
+| MPI ranks | Walkers/rank | PSS (GiB) | RSS (GiB) | avg/eq (s) | avg/sp (s) | Total (s) |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 400 | 0.787 | 0.890 | 1.961 | 47.288 | 255.031 |
+| 2 | 200 | 1.219 | 1.492 | 1.429 | 28.660 | 139.535 |
+| 4 | 100 | 2.128 | 2.747 | 1.049 | 16.725 | 88.459 |
+| 8 | 50 | 3.849 | 5.165 | 0.812 | 7.810 | 50.048 |
+
+Observations:
+
+- MPI provides substantial coarse-grained parallelism, contrary to the initial expectation that a single JAX process would be sufficient.
+- Eight ranks achieve a 6.05x AD speedup at a 4.89x memory cost.
+- Replicated memory overhead is approximately 0.44 GiB per additional rank.
+- Larger walker batches exhibit better per-walker computational efficiency: 400 walkers in one rank take 47.29 s, compared with 8 x 7.81 = 62.48 s.
+- MPI parallelism and JAX batching are complementary.
+- Discovered that the original implementation explicitly restricts CPU multithreading via XLA flags. The experiment therefore does not represent unrestricted JAX multithreading.
+
+**Decision:** Retain four MPI ranks for the walker-population benchmarks. Reconsider the optimal rank count for larger systems.
+
+### Memory monitoring bug under Slurm
+
+Initially, memwatch reported approximately 0.21 GiB regardless of MPI rank count.
+
+Hydra was launching MPI processes outside the monitored process tree under Slurm.
+
+Fixed by setting:
+
+`export HYDRA_LAUNCHER=fork`
+
+This restores local process ancestry for single-node execution, allowing memwatch to capture the MPI workers.
+
+## 3. Generalized checkpointing implementation
+
+Removed hardcoded checkpointing intervals and introduced configurable checkpointing through the propagator dataclass.
+
+Parameters:
+
+- `n_steps_per_ckpt`
+- `n_ene_per_ckpt`
+- `do_sr_ckpt`
+- `do_eval_ckpt`
+
+Implementation changes:
+
+- Pass checkpointing options from `mpi_jax.py` into the propagator.
+- Consolidate repeated propagator constructor arguments.
+- Validate nonnegative checkpoint intervals and divisibility in `__post_init__()`.
+- Preserve the original random field generation when CS is disabled.
+
+CS requires a different random field generation scheme, generating fields within each checkpoint rather than across the entire E-block. Consequently, different CS intervals may produce different random trajectories.
+
+### Improved CS″ strategy
+
+Combined walker orthonormalization, overlap evaluation, and local energy evaluation into one checkpointed function.
+
+Evaluation checkpointing is automatically enabled whenever CS is enabled. It can also be independently enabled for CE or CSR.
+
+Condition:
+
+`if propagator.n_steps_per_ckpt or propagator.do_eval_ckpt:`
+
+Previous measurements at 800 walkers/rank:
+
+| Strategy | Peak PSS (GiB) |
+|---|---:|
+| Original CS50 | 3.00 |
+| CS50 + local energy checkpoint | 2.65 |
+| CS50″ | 2.57 |
+| CE50 | 2.51 |
+
+Plain CS is inefficient because evaluation residuals accumulate across all E-blocks. Combined evaluation checkpointing replaces these large residuals with relatively compact input states.
+
+## 4. Explicit JAX compilation and runtime methodology
+
+Identified systematic timing bias in the first sampling iteration and first two equilibration iterations.
+
+Implemented explicit compilation using `.lower().compile()` for both equilibration and differentiated sampling.
+
+Moved compilation and JAXPR/saved-residual diagnostics before the iteration-0 timestamp.
+
+This separates compilation costs from recurring execution costs without discarding timing observations.
+
+### Propagation state bugs
+
+Explicit compilation exposed two inconsistencies previously hidden by automatic JIT recompilation:
+
+1. `n_killed_walkers` was absent from the initial propagation state but introduced after the first iteration, changing the input pytree structure.
+2. The same variable changed from an integer count to a floating-point fraction after normalization.
+
+Fixed by initializing the variable with a consistent floating-point dtype.
+
+The propagation state must preserve its pytree structure, shapes, and dtypes between calls to the compiled executable.
+
+## 5. Second-generation walker-population benchmark
+
+Prepared jobs/ckpt-vs-nw-v2.csv and submitted the rerun series. Improvements:
+
+Improved CS″ checkpointing: Combined orthonormalization, overlap calculation, and local energy evaluation into a single checkpoint, preventing large evaluation residuals from accumulating across E-blocks.
+
+Generalized checkpointing implementation: All strategies are selected through configuration parameters rather than manual source-code changes, ensuring a consistent implementation across experiments.
+
+Consistent propagation state: Fixed changes in pytree structure and dtype that previously caused unnecessary JIT recompilation during equilibration.
+
+Improved timing statistics: Compilation and diagnostic costs are excluded from iteration timings, allowing all timing observations to be retained and yielding substantially narrower confidence intervals.
+
+Automated memory profiling: Consistent process-tree PSS and RSS measurements, including all MPI workers, with time-resolved logs and per-process peak memory.
+
+Additional checkpointing strategy: CSR400 is now included, allowing direct comparison with CE400.
+
+Improved reproducibility: Explicit experiment parameters in CSV files, resolved parameter dumps in JSON, isolated working directories, and standardized execution environments.
+
+Correction of anomalous measurements: Rerun previously affected configurations, particularly the uncheckpointed high-population runs that experienced swapping and the anomalously slow CE50/800 run.
+
+## 6. TODO
+
+Verify completion and correctness of the new benchmark series.
+
+Aggregate memory and runtime results.
+
+Regenerate memory and runtime scaling plots.
+
+Compare CS″, CE, CSR, and uncheckpointed AD.
+
+Identify optimal checkpoint intervals.
+
+Begin system-size scaling using hydrogen chains.
+
+Investigate nested checkpointing for larger systems if necessary.
+
+Clarify computing-resource authorization after break.
+
+Eventually implement structured runtime output and a generic results collector.
 
