@@ -1,3 +1,6 @@
+import json
+import pandas as pd
+from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
@@ -6,37 +9,61 @@ from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 plt.rcParams["font.family"] = "Noto Sans"
 
 population = np.array([50, 100, 200, 400, 600, 800])
-pss = {
-    '1': [2.28,2.45,2.73,3.24,3.76,4.21],
-    '2': [2.20,2.29,2.54,2.81,3.17,3.56],
-    '5': [2.16,2.26,2.44,2.68,2.94,3.15],
-    '10': [2.18,2.19,2.32,2.67,2.82,3.01],
-    '25': [2.20,2.31,2.43,2.74,2.83,3.02],
-    '50b': [2.19,2.25,2.42,2.73,2.89,3.00], # dt50
-    'None': [5.18,7.73,12.02,21.32,28.93,40.32],
-    '50': [2.10,2.12,2.16,2.27,2.41,2.51],
-    '100': [2.19,2.21,2.32,2.51,2.74,2.93],
-    '200': [2.18,2.26,2.39,2.73,3.05,3.30],
-    '400': [2.22,2.40,2.65,3.19,3.72,4.22],
-}
+
+df = pd.read_csv("jobs/ckpt-vs-nw-v2.csv")
+pss = {}
+for _, row in df.iterrows():
+    # Determine checkpoint strategy
+    if row["n_steps_per_ckpt"]:
+        name = f"CS{int(row['n_steps_per_ckpt'])}"
+    elif row["n_ene_per_ckpt"]:
+        name = f"CE{int(row['n_ene_per_ckpt'] * row['n_prop_steps'])}"
+    elif row["do_sr_ckpt"]:
+        name = f"CSR{int(row['n_ene_blocks'] * row['n_prop_steps'])}"
+    else:
+        name = "None"
+
+    if name not in pss:
+        pss[name] = np.full(len(population), np.nan)
+
+    try:
+        with open(Path(row["workdir"]) / "memtot.json") as f:
+            mem = json.load(f)
+
+        i = np.where(population == row["n_walkers"])[0][0]
+        pss[name][i] = mem["peak_pss_gib"]
+
+    except (OSError, ValueError, KeyError) as e:
+        print(f"Failed: {row['workdir']}: {e}")
+
+for name, values in pss.items():
+    print(f"{name:>6}: {np.round(values, 3)}")
 
 # Colors: strongest emphasis on CE50.
 # Alpha decreases for intervals farther from 50.
 styles = {
-    "1":    ("darkorange", 0.5),
-    "2":    ("darkorange", 0.6),
-    "5":    ("darkorange", 0.7),
-    "10":   ("darkorange", 0.8),
-    "25":   ("darkorange", 0.8),
-    "50b":  ("darkorange", 1.0),
+    "CS1":  ("#df7500", 1.0),
+    "CS2":  ("#e67e00", 1.0),
+    "CS5":  ("#f59016", 1.0),
+    "CS10": ("#ffa638", 1.0),
+    "CS25": ("#fa9b28", 1.0),
+    "CS50": ("#ed8700", 1.0),
 
-    "50":   ("steelblue", 1.0),
-    "100":  ("steelblue", 0.8),
-    "200":  ("steelblue", 0.6),
-    "400":  ("steelblue", 0.5),
+    "CE50":   ("#91bde0", 1.0),
+    "CE100":  ("#6096c4", 1.0),
+    "CE200":  ("#326da3", 1.0),
+    "CE400":  ("#174578", 1.0),
 
-    "None": ("darkred", 0.85),
+    "CSR400": ("#174578", 0.7),
+    "None":   ("darkred", 0.85),
 }
+
+hidden = (
+    "None",
+    "CE400",
+    "CS5",
+    "CS25",
+)
 
 fig, ax = plt.subplots(figsize=(8, 4.3))
 fig.subplots_adjust(right=0.82)
@@ -45,11 +72,7 @@ for name, values in pss.items():
     y = np.asarray(values, dtype=float)
     color, alpha = styles[name]
 
-    # No-checkpoint data appears only in the inset.
-    if name == "None":
-        continue
-    # Hide these two as well, too close to 25
-    if name in ("10", "50b"):
+    if name in hidden:
         continue
 
     ax.plot(
@@ -57,20 +80,20 @@ for name, values in pss.items():
         color=color,
         alpha=alpha,
         markersize=3,
-        linewidth=2.2 if name == "50" else 1.5,
-        zorder=4 if name == "50" else 2,
+        linewidth=2.2 if name == "CS10" else 1.2,
     )
 
-
     offsets = {
-        "1":   (10, 5),
-        "400": (10, -5),
+        # "CS10": (8, -10),
+        # "CS25": (8, -6),
+        # "CS5":  (8, -1),
+        # "CE50": (8,  7),
+        # "CS50": (8, 10),
     }
-
     dx, dy = offsets.get(name, (5, 0))
 
     ax.annotate(
-        name,
+        name.lstrip("CESR"),
         xy=(population[-1], y[-1]),
         xytext=(dx, dy),
         textcoords="offset points",
@@ -101,13 +124,7 @@ ax.grid(alpha=0.2)
 ax.set_axisbelow(True)
 
 # Smaller inset in upper-left corner.
-axins = inset_axes(
-    ax,
-    width="34%",
-    height="28%",
-    loc="upper left",
-    borderpad=(2.8, 1.0),
-)
+axins = ax.inset_axes((0.07, 0.69, 0.34, 0.28))
 
 for name, values in pss.items():
     color, alpha = styles[name]
@@ -135,6 +152,15 @@ legend_handles = [
            label="Checkpoint after sampling"),
     Line2D([0], [0], color="darkred", lw=2,
            label="No checkpointing"),
+    Line2D(
+        [], [],
+        color="steelblue",
+        marker="$50$",
+        markersize=9,
+        markeredgewidth=0,
+        linestyle="none",
+        label="Checkpoint interval",
+    )
 ]
 
 ax.legend(
@@ -143,27 +169,10 @@ ax.legend(
     bbox_to_anchor=(0.42, 0.99),
     frameon=False,
     fontsize=9,
-    labelspacing=0.1,
-)
-
-ax.annotate(
-    "Steps per\ncheckpoint",
-    xy=(820, pss["50"][-1] -0.05),
-    xytext=(790, 2.1),
-    color="black",
-    fontsize=9,
-    ha="center",
-    arrowprops=dict(
-        arrowstyle="-",
-        color="black",
-        lw=0.7,
-        shrinkA=0,
-        shrinkB=3,
-    ),
 )
 
 plt.savefig(
-    "memory-ckpt-nw.png",
+    "plot/memory-ckpt-nw.png",
     dpi=300,
     bbox_inches="tight",
 )
