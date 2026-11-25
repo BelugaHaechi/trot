@@ -157,6 +157,12 @@ def _prep_afqmc(options=None):
     options["free_projection"] = options.get("free_projection", False)
     options["do_grad"] = options.get("do_grad",False)
 
+    # Register checkpointing options
+    options["n_steps_per_ckpt"] = options.get("n_steps_per_ckpt", 0)
+    options["n_ene_per_ckpt"] = options.get("n_ene_per_ckpt", 0)
+    options["do_sr_ckpt"] = options.get("do_sr_ckpt", False)
+    options["do_eval_ckpt"] = options.get("do_eval_ckpt", False)
+
     if abs(ms) != 0:
         try:
             assert options["walker_type"] != "rhf"
@@ -182,53 +188,56 @@ def _prep_afqmc(options=None):
     ham_data["chol"] = chol.reshape(nchol, -1)
     ham_data["ene0"] = options["ene0"]
     ham_data["dm0"] = None
+
+    prop_options = {
+        key: options[key]
+        for key in (
+            "dt",
+            "n_prop_steps",
+            "n_ene_blocks",
+            "n_sr_blocks",
+            "n_blocks",
+            "n_walkers",
+            "n_steps_per_ckpt",
+            "n_ene_per_ckpt",
+            "do_sr_ckpt",
+            "do_eval_ckpt",
+        )
+    }
+    prop_options["is_ad_mode_enabled"] = is_ad_mode_enabled
+
     if options["walker_type"] == "rhf":
+
         ham_data["h1"] = h1
         if options["symmetry"]:
             ham_data["mask"] = jnp.where(jnp.abs(ham_data["h1"]) > 1.0e-10, 1.0, 0.0)
         else:
             ham_data["mask"] = jnp.ones(ham_data["h1"].shape)
         ham = hamiltonian.hamiltonian(nmo, nelec // 2, nchol)
-        prop = propagation.propagator(
-            options["dt"],
-            options["n_prop_steps"],
-            options["n_ene_blocks"],
-            options["n_sr_blocks"],
-            options["n_blocks"],
-            is_ad_mode_enabled,
-            options["n_walkers"],
-        )
+        prop = propagation.propagator(**prop_options)
         trial = wavefunctions.rhf(norb, nelec // 2)
         wave_data = jnp.array(np.load("rhf.npz")["mo_coeff"]) #jnp.eye(norb)
+
     elif options["walker_type"] == "uhf":
+
         ham_data["h1"] = jnp.array([h1, h1])
         if options["symmetry"]:
             ham_data["mask"] = jnp.where(jnp.abs(ham_data["h1"]) > 1.0e-10, 1.0, 0.0)
         else:
             ham_data["mask"] = jnp.ones(ham_data["h1"].shape)
+
         if options["trial"] == "noci":
             ham = hamiltonian.hamiltonian_noci(nmo, nelec_sp, nchol)
+
             if options["free_projection"]:
-                prop = propagation.propagator_uhf(
-                    options["dt"],
-                    options["n_prop_steps"],
-                    options["n_ene_blocks"],
-                    options["n_sr_blocks"],
-                    options["n_blocks"],
-                    True,
-                    options["n_walkers"],
-                    10,
-                )
+                prop = propagation.propagator_uhf(**{
+                    **prop_options,
+                    "is_ad_mode_enabled": True,
+                    "n_exp_terms": 10,
+                })
             else:
-                prop = propagation.propagator_uhf(
-                    options["dt"],
-                    options["n_prop_steps"],
-                    options["n_ene_blocks"],
-                    options["n_sr_blocks"],
-                    options["n_blocks"],
-                    is_ad_mode_enabled,
-                    options["n_walkers"],
-                )
+                prop = propagation.propagator_uhf(**prop_options)
+
             with open("dets.pkl", "rb") as f:
                 wave_data = pickle.load(f)
             wave_data = [
@@ -236,29 +245,19 @@ def _prep_afqmc(options=None):
                 [jnp.array(wave_data[1][0]), jnp.array(wave_data[1][1])],
             ]
             trial = wavefunctions.noci(norb, nelec_sp, wave_data[0].size)
+
         else:
             ham = hamiltonian.hamiltonian_uhf(nmo, nelec_sp, nchol)
+
             if options["free_projection"]:
-                prop = propagation.propagator_uhf(
-                    options["dt"],
-                    options["n_prop_steps"],
-                    options["n_ene_blocks"],
-                    options["n_sr_blocks"],
-                    options["n_blocks"],
-                    True, # WARN: hardcoded value
-                    options["n_walkers"],
-                    10, # WARN: hardcoded value
-                )
+                prop = propagation.propagator_uhf(**{
+                    **prop_options,
+                    "is_ad_mode_enabled": True,
+                    "n_exp_terms": 10,
+                })
             else:
-                prop = propagation.propagator_uhf(
-                    options["dt"],
-                    options["n_prop_steps"],
-                    options["n_ene_blocks"],
-                    options["n_sr_blocks"],
-                    options["n_blocks"],
-                    is_ad_mode_enabled,
-                    options["n_walkers"],
-                )
+                prop = propagation.propagator_uhf(**prop_options)
+
             trial = wavefunctions.uhf(norb, nelec_sp)
             wave_data = jnp.array(np.load("uhf.npz")["mo_coeff"])
 

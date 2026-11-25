@@ -45,6 +45,7 @@ defaults = {
     "n_steps_per_ckpt": 0,
     "n_ene_per_ckpt": 1,
     "do_sr_ckpt": False,
+    "do_eval_ckpt": False,
 }
 
 g = parser.add_argument_group("Physical system")
@@ -76,6 +77,7 @@ g.add_argument("--orbital_rotation", action=argparse.BooleanOptionalAction)
 g.add_argument("--n_steps_per_ckpt", type=int)
 g.add_argument("--n_ene_per_ckpt", type=int)
 g.add_argument("--do_sr_ckpt", action=argparse.BooleanOptionalAction)
+g.add_argument("--do_eval_ckpt", action=argparse.BooleanOptionalAction)
 
 parser.set_defaults(**defaults)
 args = parser.parse_args()

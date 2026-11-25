@@ -62,6 +62,12 @@ class propagator:
     n_walkers: int = 50
     n_exp_terms: int = 6
 
+    # Checkpointing
+    n_steps_per_ckpt: int = 0
+    n_ene_per_ckpt: int = 0
+    do_sr_ckpt: bool = False
+    do_eval_ckpt: bool = False
+
     def init_prop_data(self, trial: wavefunctions.wave_function, wave_data,
                              ham: hamiltonian.hamiltonian, ham_data, init_walkers=None):
         """
