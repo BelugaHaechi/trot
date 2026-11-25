@@ -723,32 +723,41 @@ def afqmcGrad(
         FALLBACK_TRIAL_STATE_RDM2 = FALLBACK_TRIAL_STATE_RDM2.reshape(ham.norb**2, ham.norb**2)
         FALLBACK_TRIAL_STATE_RDM2 = jnp.array(FALLBACK_TRIAL_STATE_RDM2)
 
-    # EQUILIBRATION PHASE
-    # lol this is where the projection actually happens...
-    comm.Barrier()
-    init_time = time.time() - init
-    if rank == 0:
-        print("# Equilibration sweeps:")
-        print("#   Iter        Block energy      Walltime")
-        n = 0
-        print(f"# {n:5d}      {prop_data['e_estimate']:.9e}     {init_time:.2f} ")
-    comm.Barrier()
 
+    # EQUILIBRATION PHASE
     # use the same propagator as the sampling phase
-    propagator_eq = deepcopy(propagator)
     # dlai: make these adjustable options
-    # suggested: set ene/sr to 8, sr/b to 2
-    # time: 0.5/energy, 4.0/sr, 8.0/avg, 80.0/eql
-    # moderate eql phase length with soft SR
+    propagator_eq = deepcopy(propagator)
     propagator_eq.n_ene_blocks = options["n_ene_per_sr_eql"]
     propagator_eq.n_sr_blocks = options["n_sr_per_b_eql"]
     neql = options["n_eql"]
 
+    # address annoying bug where this key was added to the dict only after iteration 1
+    # someone forgot to initialize this! for some bad reason it's a float
+    prop_data["n_killed_walkers"] = jnp.array(0, dtype=jnp.float64)
+
+    # Compile equilibration
+    comm.Barrier()
+    t0 = time.perf_counter()
+
+    propagate_eq_fn = sampler.propagate_phaseless.lower(
+        ham, ham_data, propagator_eq, prop_data, trial, wave_data
+    ).compile()
+
+    comm.Barrier()
+    if rank == 0:
+        print(f"# Equilibration compilation walltime: {time.perf_counter() - t0:.3f} s")
+
+    # Start timing iterations after compilation
+    init_time = time.time() - init
+    if rank == 0:
+        print("# Equilibration sweeps:")
+        print("#   Iter        Block energy      Walltime")
+        print(f"# {0:5d}      {prop_data['e_estimate']:.9e}     {init_time:.2f} ")
+    comm.Barrier()
+
     for n in range(1, neql + 1):
-        # sr-ph-AFQMC propagation of one superblock... LAO basis
-        block_energy_n, prop_data = sampler.propagate_phaseless(
-            ham, ham_data, propagator_eq, prop_data, trial, wave_data
-        )
+        block_energy_n, prop_data = propagate_eq_fn(ham_data, prop_data, wave_data)
 
         # preprocessing of the data: wrap them into len-1 arrays, for comm.Reduce
 
@@ -804,17 +813,6 @@ def afqmcGrad(
     # NOTE: FROM THIS POINT ON, WE ASSUME THAT SUBSEQUENT PROPAGATION DOES
     # NOT STATISTICALLY IMPROVE THE EXPECTATION VALUE OF ANY OBSERVABLES.
     # WE ASSUME THAT EACH OBSERVATION FOLLOWS A WEAKLY STATIONARY PROCESS.
-    comm.Barrier()
-    init_time = time.time() - init
-    if rank == 0:
-        print("#\n# Sampling sweeps:")
-        if options["ad_mode"] is None:
-            print("#  Iter      Mean energy        Stochastic error     Walltime")
-        else:
-            print(
-                "#  Iter      Mean energy        Stochastic error     Mean observable     Walltime"
-            )
-    comm.Barrier()
 
     # prepare storage for preblocked observable averages, for blocking analysis
     # length n_blocks * nproc, each element same shape as observable
@@ -878,15 +876,64 @@ def afqmcGrad(
     prop_data_tangent = jax.tree.map(make_zero_tangent, prop_data)
     observable_op_tangent = jnp.zeros_like(observable_op)
 
+
     # MAIN CYCLE
     block_rdm1_n = np.zeros_like(rdm_op)
     block_rdm2_n = np.zeros_like(rdm_2_op)
     block_observable_n = 0.0
     local_large_deviations = np.array(0)
+
+    # compile before timing each superblock
+    if options["do_grad"]:
+        value_and_grad_fn = jax.jit(
+            jax.value_and_grad(
+                propagate_phaseless_wrapper,
+                argnums=(0, 1),
+                has_aux=True,
+            )
+        )
+
+        # dlai: print jaxpr and residuals to file for reference
+        if rank == 0:
+            with open("jaxpr.txt", "w") as f:
+                f.write(
+                    jax.make_jaxpr(value_and_grad_fn)(rdm_op, rdm_2_op, prop_data)
+                    .pretty_print(use_color=False)
+                )
+
+            import contextlib
+            from jax.ad_checkpoint import print_saved_residuals
+
+            def func(rdm_op, rdm_2_op):
+                return propagate_phaseless_wrapper(rdm_op, rdm_2_op, prop_data)
+
+            with open("saved_residuals.txt", "w") as fout:
+                with contextlib.redirect_stdout(fout):
+                    print_saved_residuals(func, rdm_op, rdm_2_op)
+
+        # Explicit compilation on all MPI ranks
+        comm.Barrier()
+        t0 = time.perf_counter()
+
+        value_and_grad_fn = value_and_grad_fn.lower(rdm_op, rdm_2_op, prop_data).compile()
+
+        comm.Barrier()
+        if rank == 0:
+            print('#')
+            print(f"# Sampling compilation walltime: {time.perf_counter() - t0:.3f} s")
+
+    # Iteration 0 time now includes compilation
     comm.Barrier()
-    if rank == 0: # dlai: print true pre-iter, post-prep time
-        print(f"     0     {time.time() - init:>70.2f}")
+    init_time = time.time() - init
+    if rank == 0:
+        print("# Sampling sweeps:")
+        if options["ad_mode"] is None:
+            print("#  Iter      Mean energy        Stochastic error     Walltime")
+        else:
+            print("#  Iter      Mean energy        Stochastic error     Mean observable     Walltime")
+            print(f"     0     {time.time() - init:>70.2f}")
     comm.Barrier()
+
     for n in range(propagator.n_blocks):
         # choose mode...
         # nuclear gradient mode by Jo
@@ -896,25 +943,6 @@ def afqmcGrad(
         if options["do_grad"]:
             # combined forward and backward pass
             # dlai: value_and_grad is more explicit than vjp
-            value_and_grad_fn = jax.value_and_grad(
-                propagate_phaseless_wrapper, argnums=(0, 1), has_aux=True
-                )
-            
-            # dlai: print jaxpr and residuals to file for reference
-            if rank == 0 and n == 0:
-                with open("jaxpr.txt", "w") as f:
-                    f.write(
-                        jax.make_jaxpr(value_and_grad_fn)(rdm_op, rdm_2_op, prop_data)
-                        .pretty_print(use_color=False)
-                    )
-                def func(rdm_op, rdm_2_op):
-                    return propagate_phaseless_wrapper(rdm_op, rdm_2_op, prop_data)
-                import contextlib
-                from jax.ad_checkpoint import print_saved_residuals
-                with open("saved_residuals.txt", "w") as fout:
-                    with contextlib.redirect_stdout(fout):
-                        print_saved_residuals(func, rdm_op, rdm_2_op)
-
             value, gradient = value_and_grad_fn(rdm_op, rdm_2_op, prop_data)
 
             # save values to disk
