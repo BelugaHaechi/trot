@@ -50,9 +50,9 @@ styles = {
     "CE50":   ("#91bde0", 1.0),
     "CE100":  ("#6096c4", 1.0),
     "CE200":  ("#326da3", 1.0),
-    "CE400":  ("#174578", 1.0),
+    "CE400":  ("#174578", 0.7),
 
-    "CSR400": ("#174578", 0.7),
+    "CSR400": ("#174578", 1.0),
     "None":   ("darkred", 0.85),
 }
 
@@ -169,8 +169,167 @@ ax.legend(
     fontsize=9,
 )
 
+# plt.savefig(
+#     "plot/memory-ckpt-nw.png",
+#     dpi=300,
+#     bbox_inches="tight",
+# )
+
+# Memory growth reduction
+slopes = {}
+
+for name, values in pss.items():
+    y = np.asarray(values)
+    valid = np.isfinite(y)
+
+    if valid.sum() < 2:
+        continue
+
+    slope, intercept = np.polyfit(
+        population[valid], y[valid], 1
+    )
+    slopes[name] = slope
+
+reduction = {
+    name: slopes["None"] / slope
+    for name, slope in slopes.items()
+    if name != "None" and slope > 0
+}
+
+names = sorted(reduction, key=reduction.get)
+
+fig, ax = plt.subplots(figsize=(6, 4.3))
+
+for name in names:
+    color, alpha = styles[name]
+    value = reduction[name]
+
+    if name == "CE400":
+        continue
+
+    ax.barh(
+        name, value,
+        color=color,
+        alpha=alpha,
+        height=0.65,
+    )
+
+    ax.text(
+        value + 3, name,
+        f"{value:.3g}×",
+        va="center",
+        fontsize=9,
+    )
+
+ax.set_xlabel("Memory growth reduction factor, linear fit")
+ax.set_xlim(0, max(reduction.values()) * 1.15)
+ax.grid(axis="x", alpha=0.2)
+ax.set_axisbelow(True)
+
 plt.savefig(
-    "plot/memory-ckpt-nw.png",
+    "plot/memory-growth-ckpt-nw.png",
+    dpi=300,
+    bbox_inches="tight",
+)
+
+
+# Memory-runtime trade-off
+
+plt.rcParams["font.family"] = "Noto Sans"
+
+from scipy.stats import t
+
+population = np.array([50, 100, 200, 400, 600, 800])
+
+df = pd.read_csv('plot/walltime-ckpt-nw.csv', keep_default_na=False, na_values=["nan", ""])
+
+df["ckpt"] = df["relpath"].apply(
+    lambda p: Path(p).parts[-3]
+)
+df["nw"] = df["relpath"].apply(
+    lambda p: int(Path(p).parts[-2])
+)
+
+df = df.set_index(["ckpt", "nw"])
+
+names = [
+    "CS1",
+    "CS2",
+    "CS5",
+    "CS10",
+    "CS25",
+    "CS50",
+    "CE50",
+    "CE100",
+    "CE200",
+    "CE400",
+    "CSR400",
+    "8000",
+]
+
+eq, sp = {}, {}
+ci_eq, ci_sp = {}, {}
+
+for name in names:
+    rows = df.reindex(
+        pd.MultiIndex.from_product([[name], population])
+    )
+
+    eq[name] = rows["avg/eq"].to_numpy()
+    sp[name] = rows["avg/sp"].to_numpy()
+
+    ci_eq[name] = (
+        t.ppf(0.975, df=9)
+        * rows["std/eq"].to_numpy()
+        / np.sqrt(10)
+    )
+
+    ci_sp[name] = (
+        t.ppf(0.975, df=3)
+        * rows["std/sp"].to_numpy()
+        / np.sqrt(4)
+    )
+
+fig, ax = plt.subplots(figsize=(6, 4.3))
+
+baseline = sp["8000"][-1]
+
+for name, value in reduction.items():
+    if name not in sp:
+        continue
+
+    x = value
+    y = 100 * (sp[name][-1] / baseline - 1)
+    color, alpha = styles[name]
+
+    ax.scatter(
+        x, y,
+        color=color,
+        alpha=alpha,
+        s=35,
+        zorder=3,
+    )
+
+    ax.annotate(
+        name,
+        xy=(x, y),
+        xytext=(0, -8),
+        ha="center",
+        va="top",
+        textcoords="offset points",
+        color=color,
+        fontsize=8,
+    )
+
+ax.set_xlabel("Memory growth reduction factor, linear fit")
+ax.set_ylabel("AD runtime overhead (%)")
+ax.set_xlim(0, 165)
+ax.set_ylim(0, 65)
+ax.grid(alpha=0.2)
+ax.set_axisbelow(True)
+
+plt.savefig(
+    "plot/tradeoff-ckpt-nw.png",
     dpi=300,
     bbox_inches="tight",
 )

@@ -202,3 +202,81 @@ plt.savefig(
     dpi=300,
     bbox_inches="tight",
 )
+
+# Relative graph
+
+baseline = 10 * np.asarray(eq["8000"])
+
+fig, ax = plt.subplots(figsize=(8, 4.3))
+fig.subplots_adjust(right=0.82)
+
+# Reverse-mode AD
+for name, values in sp.items():
+    y = np.asarray(values) / baseline
+    color, alpha = styles[name]
+
+    ax.errorbar(
+        population, y,
+        yerr=ci_sp[name] / baseline,
+        fmt="-",
+        color=color,
+        alpha=alpha,
+        linewidth=2.2 if name == "CS10" else 1.5,
+        elinewidth=0.8,
+        capsize=2,
+        capthick=0.8,
+        zorder=4 if name == "CS10" else 2,
+    )
+
+    if name == "8000":
+        continue
+
+    ax.annotate(
+        name.lstrip("CESR"),
+        xy=(population[-1], y[-1]),
+        xytext=offsets.get(name, (5, 0)),
+        textcoords="offset points",
+        color=color,
+        alpha=alpha,
+        fontsize=9,
+        va="center",
+        annotation_clip=False,
+    )
+
+# Forward propagation
+for name, values in eq.items():
+    color, alpha = styles[name]
+
+    if name == "8000":
+        continue
+
+    ax.plot(
+        population,
+        10 * np.asarray(values) / baseline,
+        "o--",
+        color=color,
+        alpha=alpha,
+        markersize=3,
+        linewidth=1.5,
+    )
+
+ax.set_xlabel("Sampler population")
+ax.set_ylabel("Relative walltime")
+ax.set_xticks(population)
+ax.set_xlim(25, 875)
+ax.set_ylim(bottom=0)
+ax.grid(alpha=0.2)
+ax.set_axisbelow(True)
+
+# ax.legend(
+#     handles=legend_handles,
+#     loc="upper left",
+#     frameon=False,
+#     fontsize=9,
+# )
+
+plt.savefig(
+    "plot/walltime-rel-ckpt-nw.png",
+    dpi=300,
+    bbox_inches="tight",
+)
