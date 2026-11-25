@@ -1,0 +1,3 @@
+id,workdir,nH,n_proc,n_walkers
+1,runs/test/1,2,1,50
+2,runs/test/2,2,2,25

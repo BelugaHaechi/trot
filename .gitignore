@@ -6,3 +6,5 @@
 FCIDUMP_chol
 /testgrad
 /runs
+/jobs/.slurm_logs
+/bench/partitions.csv

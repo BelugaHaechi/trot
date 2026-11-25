@@ -29,7 +29,7 @@ process_peaks = {}
 start_time = time.monotonic()
 lines_printed = 0
 
-csv_path = f"memlog.csv"
+csv_path = "memlog.csv"
 
 
 def descendants(root):
@@ -226,7 +226,8 @@ summary = {
     "peak_rss_gib": peak_rss_kb / 1024**2,
     "process_peak_pss_gib": {
         pid: peak / 1024**2
-        for pid, peak in sorted(process_peaks.items())
+        for pid, peak in sorted(process_peaks.items(),
+            key=lambda x: x[1], reverse=True)
     },
 }
 

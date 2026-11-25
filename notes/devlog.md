@@ -475,9 +475,28 @@ Made hchain fully command line, and integration with CSV (launch) and SLURM (bat
 
 USAGE
 
-sbatch bench/batch.sh bench/hchain.py jobs/JOBNAME.csv
+To run from interactive:
 
-The script automatically hooks up the conda env and python path
+python bench/launch.py bench/hchain.py jobs/JOBNAME.csv ID
+
+To submit async to scheduler:
+
+sbatch bench/batch.sh bench/hchain.py jobs/JOBNAME.csv
+and a bunch of SLURM settings
+
+The script automatically hooks up the conda env and python path. However, this would also require manually setting SLURM settings.
+
+Improved architecture: an extra script, submit.py
+Automatically derives most of the SLURM settings from the CSV and partition name, assembling the full SLURM cmd
+
+python bench/submit.py bench/hchain.py jobs/JOBNAME.csv PARTITION 4 --dry-run
+
+So the overall hierarchy:
+
+hchain.py, memwatch.py - run the benchmark test once
+launch.py - auto supply params from CSV
+batch.sh - auto setup and schedule tasks in CSV
+submit.py - auto create the batch command
 
 
 
