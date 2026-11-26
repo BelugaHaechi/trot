@@ -41,6 +41,7 @@ defaults = {
     "n_eql": 10,
 
     # Differentiation
+    "do_nuc_grad": False,
     "orbital_rotation": False,
     "n_steps_per_ckpt": 0,
     "n_ene_per_ckpt": 1,
@@ -73,6 +74,7 @@ g.add_argument("--n_sr_per_b_eql", type=int)
 g.add_argument("--n_eql", type=int)
 
 g = parser.add_argument_group("Differentiation")
+g.add_argument("--do_nuc_grad", action=argparse.BooleanOptionalAction)
 g.add_argument("--orbital_rotation", action=argparse.BooleanOptionalAction)
 g.add_argument("--n_steps_per_ckpt", type=int)
 g.add_argument("--n_ene_per_ckpt", type=int)
@@ -100,6 +102,7 @@ AUXBASIS_SPECFIC = options.pop("auxbasis") # None=default, alt: "def2-svp-jkfit"
 # WARN: sto6g does not have predefined auxbasis, see pyscf.df.addons
 # using sto3g and 321g's default, which should be reasonable
 nproc = options.pop("n_proc")
+do_nuc_grad = options.pop("do_nuc_grad")
 
 print("RHF computation")
 atom_symbols = np.array(["H"] * nH)
@@ -127,21 +130,26 @@ print(f"Total walkers: {n_walkers_tot}")
 print(f"Total nominal samples (k): {n_walkers_tot * options['n_ene_blocks'] * options["n_sr_blocks"] * options['n_blocks'] / 1000}")
 print(f"Total preblocked averages: {nproc * options['n_blocks']}")
 
-print()
-print("Computing finite differences...")
-grad_utils.FD_integrals(mf)            # Integral_der.npz
-grad_utils.write_integrals_lowdins(mf) # FCIDUMP_chol, rhf.npz
-# NOTE: rhf.npz was redundant work... LAO-dm was already done in FD_integrals
-print("Done. Saved to disk. Proceed to run afqmcGrad...")
-run_afqmc.run_afqmc(options=options,nproc=nproc) # bc do_grad==True, calls driver.afqmcGrad()
-# takes FCIDUMP_chol and rhf.npz, outputs en_der_afqmc_*.npz
-grad_utils.calculate_nuc_gradients(uhf=False) # uses Integral_der and en_der_afqmc_*
+if do_nuc_grad:
+    print("\nComputing finite differences...", end="")
+    grad_utils.FD_integrals(mf)             # Integral_der.npz (also saves LAO-dm for dm0 in rot_orb)
+    print("Done.")
 
-print()
-print("Reference gradients")
-mf_grad = mf.Gradients()
-mf_grad.kernel()
-print(f"rH = {rH}")
-mc = cc.CCSD(mf)
-mc.kernel()
-g = mc.nuc_grad_method().kernel()
+print("\nTransforming integrals...", end="")
+grad_utils.write_integrals_lowdins(mf)      # FCIDUMP_chol (LAO integrals), rhf.npz (trial wfn)
+print("Done.\nProceed to run AFQMC...")
+
+run_afqmc.run_afqmc(options=options, nproc=nproc)
+# bc do_grad==True, calls driver.afqmcGrad(), takes FCIDUMP_chol and rhf.npz, outputs en_der_afqmc_*.npz
+
+if do_nuc_grad:
+    grad_utils.calculate_nuc_gradients(uhf=False) # uses Integral_der and en_der_afqmc_*
+
+    print("\nReference gradients")
+    mf_grad = mf.Gradients()
+    mf_grad.kernel()
+    print(f"rH = {rH}")
+
+    mc = cc.CCSD(mf)
+    mc.kernel()
+    g = mc.nuc_grad_method().kernel()

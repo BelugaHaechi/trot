@@ -1,0 +1,6 @@
+id,workdir,nH,n_proc,n_walkers,n_steps_per_ckpt,n_ene_per_ckpt,do_sr_ckpt,do_eval_ckpt,do_nuc_grad,orbital_rotation
+1,runs/ckpt-vs-nh/CE50/2,2,1,100,0,1,False,False,False,True
+2,runs/ckpt-vs-nh/CE50/4,4,1,100,0,1,False,False,False,True
+3,runs/ckpt-vs-nh/CE50/8,8,1,100,0,1,False,False,False,True
+4,runs/ckpt-vs-nh/CE50/16,16,1,100,0,1,False,False,False,True
+5,runs/ckpt-vs-nh/CE50/32,32,1,100,0,1,False,False,False,True

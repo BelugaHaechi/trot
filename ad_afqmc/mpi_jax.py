@@ -284,7 +284,14 @@ if __name__ == "__main__":
         if(options["do_grad"]):
             os.system(f"rm en_der_afqmc_{comm.rank}.npz")
             print(f"Removed en_der_afqmc_{comm.rank}",flush=True)
-            ham_data["dm0"] = np.load("Integral_der.npz")["dm"]
+
+            # dsl44: For RHF trials, reconstruct the initial SCF density for ham.rot_orb
+            # directly from the LAO-basis trial orbitals.
+            # Note, the original version can have UHF/NOCI trials and this RHF guess
+            # This is a temp workaround only, so that we can skip Integral_der
+            # ham_data["dm0"] = np.load("Integral_der.npz")["dm"]
+            occ = np.asarray(wave_data)[:, :ham.nelec]
+            ham_data["dm0"] = 2.0 * occ @ occ.T
             comm.Barrier()
             e_afqmc, err_afqmc = driver.afqmcGrad(ham_data, ham, prop, trial, wave_data, observable, options)
         else: 
